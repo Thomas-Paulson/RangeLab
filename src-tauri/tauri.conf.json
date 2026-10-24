@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RangeLab",
+  "version": "0.1.0",
+  "identifier": "com.thomaspaulson.rangelab",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "RangeLab \u00b7 ESP32 Configuration Studio",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 920,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true,
+        "backgroundColor": "#0b0e14"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "ESP32 and ELRS configuration workbench",
+    "longDescription": "A cross-platform desktop workbench for ESP32 serial telemetry, receiver channel monitoring, range configuration and command automation.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
