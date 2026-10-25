@@ -5,7 +5,7 @@ Updated: 2026-10-25
 ## Current implementation
 - Standalone React + TypeScript desktop interface (single mapping studio view) with its own firmware (`firmware/RangeLab_ESP32.ino`); no flight-controller stack is involved.
 - Tauri 2 / Rust serial backend with port discovery, connect/disconnect, incoming serial events, and serial writes.
-- ASCII bridge telemetry parsing for `CH`, `LINK`, `CFG`, `STATUS`, `DEVICE`, and `LOG` lines.
+- ASCII bridge telemetry parsing for `CH`, `LINK`, `CFG`, `STATUS`, `DEVICE`, `RAIL`, `WIRE`, `EVENT` and `LOG` lines. The firmware rate-limits the `CH`/`LINK` telemetry (50 Hz / 10 Hz) rather than printing one line per receiver frame, because at 500 Hz that overflows the 115200-baud USB console and stalls the loop that reads the receiver; outputs still run on every frame.
 - Sixteen-channel display, per-channel mapping editor, profile export/import (RangeLab-profile-v1).
 - Output modes: `OFF`, `SERVO`, `PWM`, `DIGITAL`, `WINDOW` (output high while the channel is inside a band), `CURVE` (5-point servo curve).
 - Field logging: arm once over USB (`LOG START`), the ESP32 then logs channel/link samples to internal flash at 10 Hz across restarts, with no laptop attached. `LOG DUMP` reads it back and the app saves it as CSV. When the log fills (~1.8 MB, roughly 30–40 minutes at 10 Hz) the oldest data is overwritten and an `OVERFLOW` marker is recorded and shown in the app.
