@@ -92,6 +92,10 @@ void bridgeCapture(char c) {
   if (c == '\r') return;
   if (c == '\n') {
     if (wsLineLen > 0 && !wsLineOverflow && webSocket.connectedClients() > 0) {
+      // Keep the terminator in the frame: the phone reassembles a byte stream
+      // and only emits complete lines, so a bare line would sit in its buffer
+      // forever and the UI would never update.
+      wsLine[wsLineLen++] = '\n';
       webSocket.broadcastTXT((uint8_t*)wsLine, wsLineLen);
     }
     wsLineLen = 0;
@@ -271,7 +275,8 @@ void onWebSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t le
   if(type==WStype_CONNECTED) {
     Console.println("STATUS,PHONE_CONNECTED");
     emitAll();
-    webSocket.sendTXT(client, controlsUnlocked ? "STATUS,CONTROLS_UNLOCKED" : "STATUS,CONTROLS_LOCKED");
+    // Terminated like every other bridge line, for the same reassembly reason.
+    webSocket.sendTXT(client, controlsUnlocked ? "STATUS,CONTROLS_UNLOCKED\n" : "STATUS,CONTROLS_LOCKED\n");
   } else if(type==WStype_DISCONNECTED) {
     if(webSocket.connectedClients()==0) { controlsUnlocked=false; Console.println("STATUS,CONTROLS_LOCKED"); }
   } else if(type==WStype_TEXT) {
