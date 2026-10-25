@@ -45,6 +45,9 @@ export function createState() {
     traceVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
+    // Bumped only when the log itself changes, so the page can re-render it on a
+    // change instead of on every channel frame.
+    logVersion: 0,
     lastLineAt: null,
   };
 }
@@ -84,7 +87,7 @@ function parseChannels(parts) {
 }
 
 function withLog(state, text) {
-  return [...state.logs, text].slice(-120);
+  return { logs: [...state.logs, text].slice(-120), logVersion: state.logVersion + 1 };
 }
 
 /** Applies one newline-free protocol line to the UI state. */
@@ -125,7 +128,7 @@ export function applyLine(state, raw) {
   }
   if (upper.startsWith('STATUS,')) {
     const text = line.slice(7).trim();
-    const next = { ...base, logs: withLog(base, text) };
+    const next = { ...base, ...withLog(base, text) };
     if (text === 'OUTPUTS_ENABLED') next.outputsEnabled = true;
     else if (text === 'OUTPUTS_DISABLED' || text === 'OUTPUTS_DISABLED_ON_BOOT') next.outputsEnabled = false;
     if (text === 'CONTROLS_UNLOCKED') next.controlsUnlocked = true;
@@ -201,9 +204,9 @@ export function applyLine(state, raw) {
   if (upper.startsWith('LOG,')) {
     const body = line.slice(4);
     if (body.startsWith('END') || body.startsWith('SIZE')) return base;
-    return { ...base, logs: withLog(base, body) };
+    return { ...base, ...withLog(base, body) };
   }
-  return { ...base, logs: withLog(base, line) };
+  return { ...base, ...withLog(base, line) };
 }
 
 /** Validates one channel mapping against the same rules the firmware enforces. */

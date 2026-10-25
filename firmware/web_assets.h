@@ -283,7 +283,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 11477 bytes
+// 11662 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -331,6 +331,9 @@ export function createState() {
     traceVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
+    // Bumped only when the log itself changes, so the page can re-render it on a
+    // change instead of on every channel frame.
+    logVersion: 0,
     lastLineAt: null,
   };
 }
@@ -370,7 +373,7 @@ function parseChannels(parts) {
 }
 
 function withLog(state, text) {
-  return [...state.logs, text].slice(-120);
+  return { logs: [...state.logs, text].slice(-120), logVersion: state.logVersion + 1 };
 }
 
 /** Applies one newline-free protocol line to the UI state. */
@@ -411,7 +414,7 @@ export function applyLine(state, raw) {
   }
   if (upper.startsWith('STATUS,')) {
     const text = line.slice(7).trim();
-    const next = { ...base, logs: withLog(base, text) };
+    const next = { ...base, ...withLog(base, text) };
     if (text === 'OUTPUTS_ENABLED') next.outputsEnabled = true;
     else if (text === 'OUTPUTS_DISABLED' || text === 'OUTPUTS_DISABLED_ON_BOOT') next.outputsEnabled = false;
     if (text === 'CONTROLS_UNLOCKED') next.controlsUnlocked = true;
@@ -487,9 +490,9 @@ export function applyLine(state, raw) {
   if (upper.startsWith('LOG,')) {
     const body = line.slice(4);
     if (body.startsWith('END') || body.startsWith('SIZE')) return base;
-    return { ...base, logs: withLog(base, body) };
+    return { ...base, ...withLog(base, body) };
   }
-  return { ...base, logs: withLog(base, line) };
+  return { ...base, ...withLog(base, line) };
 }
 
 /** Validates one channel mapping against the same rules the firmware enforces. */
@@ -539,7 +542,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 14821 bytes
+// 15059 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -564,7 +567,8 @@ let socket = null;
 let selected = 1;
 let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
-let renderedLineCount = -1;
+let renderedLogVersion = -1;
+let retryTimer = 0;
 let renderedEventVersion = -1;
 let renderedTraceVersion = -1;
 let lastFrame = 0;
@@ -585,11 +589,12 @@ function setPill(kind, text) {
 }
 
 function push(text) {
-  state = { ...state, logs: [...state.logs, text].slice(-120), lineCount: state.lineCount };
-  renderedLineCount = -1;
+  state = { ...state, logs: [...state.logs, text].slice(-120), logVersion: state.logVersion + 1 };
 }
 
 function connect() {
+  clearTimeout(retryTimer);
+  retryTimer = 0;
   if (socket) {
     socket.onclose = null;
     socket.onopen = null;
@@ -626,7 +631,10 @@ function connect() {
     setPill('', 'OFFLINE');
     socket = null;
     push('Bridge disconnected. Retrying…');
-    setTimeout(connect, retryMs);
+    // One timer at a time: a stale retry can otherwise open a second socket and
+    // leave the page talking to whichever one loses the race.
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(Math.round(retryMs * 1.6), RETRY_MAX_MS);
   };
 }
@@ -789,8 +797,8 @@ function render() {
   renderEvents();
   renderTrace();
 
-  if (state.lineCount !== renderedLineCount) {
-    renderedLineCount = state.lineCount;
+  if (state.logVersion !== renderedLogVersion) {
+    renderedLogVersion = state.logVersion;
     const log = el('log');
     log.innerHTML = state.logs.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
     log.scrollTop = log.scrollHeight;
@@ -978,6 +986,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 39631;
+static constexpr size_t WEB_ASSETS_BYTES = 40054;
 
 #endif  // RANGELAB_WEB_ASSETS_H

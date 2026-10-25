@@ -47,6 +47,7 @@
 #include <Preferences.h>
 #include <LittleFS.h>
 #include <esp_system.h>  // esp_reset_reason(): tell a brownout reset from a normal one
+#include <driver/gpio.h>  // gpio_get_level is IRAM-safe, unlike digitalRead, for the ISR below
 
 // ---------------------------------------------------------------------------
 // Transports
@@ -66,10 +67,20 @@
 // Dev boards often sit around 4.7V on VIN (series diode from USB) and the AMS1117
 // needs ~4.4V to hold 3.3V, so the defaults trip a little below the idle reading.
 // Tune them from the live RAIL value shown on the page (about 250-350mV under it).
+// Guarded so a build can define them on the command line and CI can compile the
+// optional paths (a feature that is never compiled is never proven to compile).
+#ifndef RANGELAB_RAIL_ADC
 #define RANGELAB_RAIL_ADC -1        // ADC1 pin, or -1 when no divider is fitted
+#endif
+#ifndef RANGELAB_RAIL_MULTIPLIER
 #define RANGELAB_RAIL_MULTIPLIER 2  // (R1+R2)/R2: 2 for 10k/10k, 3 for 20k/10k
+#endif
+#ifndef RANGELAB_RAIL_LOW_MV
 #define RANGELAB_RAIL_LOW_MV 4400   // a sample below this starts a dip
+#endif
+#ifndef RANGELAB_RAIL_OK_MV
 #define RANGELAB_RAIL_OK_MV 4550    // hysteresis: back above this ends it
+#endif
 
 // Optional power-good latch input. The ADC cannot promise to see a rub that lasts
 // a millisecond, but a GPIO edge is latched in hardware and reaches an ISR even
@@ -81,7 +92,9 @@
 // A supervisor includes its own reset delay in the reported duration; use a
 // comparator if you need the true dip length. Pick a pin that is neither the ADC
 // tap nor one of the SAFE_PINS outputs.
+#ifndef RANGELAB_PWRGOOD_PIN
 #define RANGELAB_PWRGOOD_PIN -1     // GPIO, or -1 when not wired
+#endif
 
 #if RANGELAB_WIFI
 #include <WiFi.h>
@@ -127,6 +140,12 @@ static constexpr uint32_t USB_BAUD = 115200;
 static constexpr uint32_t CRSF_BAUD = 420000;
 static constexpr uint32_t RC_TIMEOUT_MS = 500;
 static constexpr uint32_t LOG_PERIOD_MS = 100; // 10 Hz field logging
+// Telemetry rate, not control rate. Outputs are written on every frame; the
+// CH/LINK lines are not. A CH line every frame at 500 Hz is 47 kB/s, four times
+// what the 115200-baud USB console can carry, and a blocked Serial.write stalls
+// the loop that reads the receiver.
+static constexpr uint32_t CH_PRINT_MS = 20;    // 50 Hz of channel telemetry
+static constexpr uint32_t LINK_PRINT_MS = 100; // 10 Hz of link statistics
 static constexpr uint8_t CRSF_RC_CHANNELS = 0x16;
 static constexpr uint8_t CRSF_LINK_STATISTICS = 0x14;
 static constexpr uint8_t SAFE_PINS[] = {13,14,17,18,19,21,22,23,25,26,27,32,33};
@@ -140,6 +159,7 @@ Preferences prefs;
 HardwareSerial CRSF(2);
 uint8_t frame[80]; size_t frameLen=0;
 uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
+uint32_t lastChPrintMs=0, lastLinkPrintMs=0;
 String usbLine;
 bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
 // Rest of the CRSF link-statistics frame: second antenna, RF mode, TX power and
@@ -324,7 +344,7 @@ void compactEventLog() {
   out.close();
 }
 void eventAppend(const char* code, const char* detail) {
-  char line[224];
+  char line[256];
   if(detail && *detail) snprintf(line, sizeof(line), "EVENT,%lu,%s,%s", (unsigned long)millis(), code, detail);
   else snprintf(line, sizeof(line), "EVENT,%lu,%s", (unsigned long)millis(), code);
   Console.println(line);              // live view over USB and to every connected phone
@@ -578,7 +598,9 @@ const char* resetReasonName(esp_reset_reason_t r) {
 // Active-low supervisor output. The GPIO peripheral latches the edge, so even a
 // microsecond dip lands here while the main loop is blocked in WiFi or flash.
 void IRAM_ATTR onPwrGoodEdge() {
-  if(digitalRead(RANGELAB_PWRGOOD_PIN) == LOW) { pwrGoodEdges++; pwrGoodLow = true; }
+  // gpio_get_level, not digitalRead: an interrupt can fire while flash is being
+  // written, and only IRAM-resident code is safe to run then.
+  if(gpio_get_level((gpio_num_t)RANGELAB_PWRGOOD_PIN) == 0) { pwrGoodEdges++; pwrGoodLow = true; }
   else pwrGoodLow = false;
 }
 #endif
@@ -650,8 +672,11 @@ void scanEvents() {
   // until its first packet, and that is not a loss.
   const bool freshStats = lastLinkStatMs != 0 && (now - lastLinkStatMs) <= RX_SILENT_MS;
   if(freshStats && linkLq > 0) sawLinkQuality = true;
-  const bool rfLostNow = freshStats && sawLinkQuality && linkLq == 0;
-  if(rfLostNow != rfLinkLost) {
+  // Transitions are judged only on a fresh statistics frame. When the stats stop
+  // arriving nothing has been proven about the link, and reporting "link back"
+  // just because the evidence ran out would be a lie.
+  const bool rfLostNow = linkLq == 0;
+  if(freshStats && sawLinkQuality && rfLostNow != rfLinkLost) {
     rfLinkLost = rfLostNow;
     if(rfLostNow) {
       rfLostAtMs = millis();
@@ -731,6 +756,9 @@ void handleCommand(String line) {
     // SET,ch,min,max,mode,pin,outLow,outHigh[,c0,c1,c2,c3,c4] => 8 or 13 fields
     if(count!=8&&count!=13){Console.println("ERROR,expected SET,ch,min,max,mode,pin,outLow,outHigh[,curve x5]");return;}
     int ch=parts[1].toInt()-1; if(ch<0||ch>15){Console.println("ERROR,channel must be 1..16");return;}
+    String mn=parts[4]; mn.toUpperCase();
+    if(mn!="OFF"&&mn!="SERVO"&&mn!="PWM"&&mn!="DIGITAL"&&mn!="WINDOW"&&mn!="CURVE"){
+      Console.println("ERROR,unknown mode; use OFF, SERVO, PWM, DIGITAL, WINDOW or CURVE");return;}
     Mapping m; m.inMin=parts[2].toInt();m.inMax=parts[3].toInt();m.mode=parseMode(parts[4]);m.pin=parts[5].toInt();m.outLow=parts[6].toInt();m.outHigh=parts[7].toInt();
     if(count==13) for(int i=0;i<5;i++) m.curve[i]=parts[8+i].toInt();
     if(m.inMin<500||m.inMax>2500||m.inMin>=m.inMax){Console.println("ERROR,input range must be 500..2500 and min < max");return;}
@@ -904,9 +932,18 @@ void startWifiBridge() {
 }
 #endif
 
+void printChannels() {
+  // One write, not seventeen: each Console.print goes through the WiFi capture
+  // and the UART byte by byte.
+  char line[176];
+  size_t at = (size_t)snprintf(line, sizeof(line), "CH");
+  for(int i=0;i<16;i++) at += (size_t)snprintf(line + at, sizeof(line) - at, ",%u", (unsigned)channels[i]);
+  Console.println(line);
+}
 void parseCrsfFrame(const uint8_t *f,size_t n) {
   if(n<4)return; uint8_t type=f[2]; const uint8_t *p=f+3; size_t plen=n-4;
-  if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.print("CH");for(int i=0;i<16;i++){Console.print(',');Console.print(channels[i]);}Console.println();}}
+  if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);
+    if(millis()-lastChPrintMs>=CH_PRINT_MS){lastChPrintMs=millis();printChannels();}}}
   else if(type==CRSF_LINK_STATISTICS&&plen>=10){
     linkRssi=(int16_t)-(int)p[0]; linkRssi2=(int16_t)-(int)p[1];
     linkLq=p[2]; linkSnr=(int8_t)p[3];
@@ -923,7 +960,7 @@ void parseCrsfFrame(const uint8_t *f,size_t n) {
       resumeCold=(linkRssi==0 && linkRssi2==0);
     }
     recordLinkPoint();
-    Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
+    if(millis()-lastLinkPrintMs>=LINK_PRINT_MS){lastLinkPrintMs=millis();Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
   }
 }
 // One UART pass. Bytes are dropped for exactly two reasons and both are counted as

@@ -49,6 +49,19 @@ jobs:
             exit "$status"
           fi
           tail -3 compile.log | grep -E 'Sketch uses|Global variables' || true
+      # The published build has the rail tap and the supervisor input compiled
+      # out, so those blocks are otherwise never type-checked. Build them here
+      # too: a feature that is never compiled is never proven to compile.
+      - name: Compile the optional rail and supervisor paths
+        shell: bash
+        run: |
+          set -e
+          sed -i 's/#define RANGELAB_RAIL_ADC -1/#define RANGELAB_RAIL_ADC 34/; s/#define RANGELAB_PWRGOOD_PIN -1/#define RANGELAB_PWRGOOD_PIN 35/' sketch/RangeLab_ESP32/RangeLab_ESP32.ino
+          # If a rename ever stops the sed matching, fail here rather than
+          # silently type-check a build where both features are still off.
+          grep -q '#define RANGELAB_RAIL_ADC 34' sketch/RangeLab_ESP32/RangeLab_ESP32.ino
+          grep -q '#define RANGELAB_PWRGOOD_PIN 35' sketch/RangeLab_ESP32/RangeLab_ESP32.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32 sketch/RangeLab_ESP32 --warnings default
       - uses: actions/upload-artifact@v4
         with:
           name: RangeLab-firmware-esp32

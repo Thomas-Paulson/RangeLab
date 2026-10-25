@@ -22,7 +22,8 @@ let socket = null;
 let selected = 1;
 let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
-let renderedLineCount = -1;
+let renderedLogVersion = -1;
+let retryTimer = 0;
 let renderedEventVersion = -1;
 let renderedTraceVersion = -1;
 let lastFrame = 0;
@@ -43,11 +44,12 @@ function setPill(kind, text) {
 }
 
 function push(text) {
-  state = { ...state, logs: [...state.logs, text].slice(-120), lineCount: state.lineCount };
-  renderedLineCount = -1;
+  state = { ...state, logs: [...state.logs, text].slice(-120), logVersion: state.logVersion + 1 };
 }
 
 function connect() {
+  clearTimeout(retryTimer);
+  retryTimer = 0;
   if (socket) {
     socket.onclose = null;
     socket.onopen = null;
@@ -84,7 +86,10 @@ function connect() {
     setPill('', 'OFFLINE');
     socket = null;
     push('Bridge disconnected. Retrying…');
-    setTimeout(connect, retryMs);
+    // One timer at a time: a stale retry can otherwise open a second socket and
+    // leave the page talking to whichever one loses the race.
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(Math.round(retryMs * 1.6), RETRY_MAX_MS);
   };
 }
@@ -247,8 +252,8 @@ function render() {
   renderEvents();
   renderTrace();
 
-  if (state.lineCount !== renderedLineCount) {
-    renderedLineCount = state.lineCount;
+  if (state.logVersion !== renderedLogVersion) {
+    renderedLogVersion = state.logVersion;
     const log = el('log');
     log.innerHTML = state.logs.map((line) => `<div>${escapeHtml(line)}</div>`).join('');
     log.scrollTop = log.scrollHeight;

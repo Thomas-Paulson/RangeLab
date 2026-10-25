@@ -39,6 +39,26 @@ test('mobile: parses link stats and device identity', () => {
   assert.equal(state.device, 'RangeLab-ESP32 1');
 });
 
+test('mobile: the log version only moves when the log does', () => {
+  // The page re-renders its log on a version change, so a version that ticks on
+  // every channel frame would redraw 120 rows fifty times a second.
+  let state = createState();
+  assert.equal(state.logVersion, 0);
+  state = applyLine(state, `CH,${filled(1000).join(',')}`);
+  state = applyLine(state, 'LINK,-64,100,9');
+  state = applyLine(state, 'RAIL,4712,4712,4400');
+  state = applyLine(state, 'WIRE,0,0,0');
+  assert.equal(state.logVersion, 0, 'telemetry lines do not enter the log');
+  assert.equal(state.lineCount, 4, 'but they are still counted as lines');
+
+  state = applyLine(state, 'STATUS,CONTROLS_UNLOCKED');
+  assert.equal(state.logVersion, 1);
+  state = applyLine(state, 'LOG,SIZE,1800000');
+  assert.equal(state.logVersion, 1, 'size and end markers are not logged');
+  state = applyLine(state, 'unexplained chatter');
+  assert.equal(state.logVersion, 2);
+});
+
 test('mobile: parses the receiver UART health counters', () => {
   assert.equal(createState().wire, null);
   let state = applyLine(createState(), 'WIRE,0,0,0');
