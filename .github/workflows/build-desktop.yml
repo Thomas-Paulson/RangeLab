@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'firmware/**'
       - 'src-tauri/**'
       - 'package.json'
       - 'package-lock.json'
@@ -12,6 +13,22 @@ on:
       - '.github/workflows/build-desktop.yml'
 
 jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - run: arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build firmware/RangeLab_ESP32.ino --warnings default
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RangeLab-firmware-esp32
+          path: build/*.bin
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     strategy:
       fail-fast: false

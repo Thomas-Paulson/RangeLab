@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "test": "node --experimental-strip-types --test tests/protocol.test.ts"
+    "test": "node --experimental-strip-types --test tests/protocol.test.ts tests/mapping.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

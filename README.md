@@ -46,7 +46,26 @@ Installer bundles are created under `src-tauri/target/release/bundle/`. Windows 
 5. Check every mapping and the attached hardware before pressing **Enable outputs**. **Disable now** turns outputs off immediately.
 6. Export/import JSON profiles to keep a local copy of settings. Importing a profile changes the editor only; apply mappings to send them to the ESP32.
 
-The supported output modes are `OFF`, `SERVO`, `PWM`, and `DIGITAL`. GPIOs are restricted to 13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32 and 33. The firmware disables outputs on startup and uses a 500 ms receiver timeout. Servo outputs use a 50 Hz LEDC signal, PWM uses 1 kHz 8-bit output, and digital mode switches at the input range midpoint.
+The supported output modes are `OFF`, `SERVO`, `PWM`, `DIGITAL`, `WINDOW` (output high only while the channel sits inside a user-set band) and `CURVE` (a five-point servo curve you draw per channel). GPIOs are restricted to 13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32 and 33. The firmware disables outputs on startup and uses a 500 ms receiver timeout. Servo outputs use a 50 Hz LEDC signal, PWM uses 1 kHz 8-bit output, and digital mode switches at the input range midpoint.
+
+## Field logging (no laptop needed)
+
+1. Press **Arm field logging** in the app (or send `LOG START`). Logging is armed immediately and stays armed across ESP32 restarts, so you can unplug it and test in the field.
+2. The ESP32 logs channel values and link statistics to its internal flash at 10 Hz.
+3. When done, plug it back in and press **Download log**, then **Save CSV**. The file has one row per sample: `millis,ch1…ch16,rssi,lq,snr`.
+4. **Clear device log** erases the stored log and disarms logging.
+
+The log wraps at about 1.8 MB (roughly 30–40 minutes at 10 Hz): the oldest data is overwritten and an `OVERFLOW` marker is written, and the app shows a "LOG OVERFLOWED" notice so you know data was replaced. Serial commands: `LOG START`, `LOG STOP`, `LOG DUMP`, `LOG CLEAR`.
+
+## Build in the cloud (GitHub Actions)
+
+You do not need a local toolchain. The workflow `.github/workflows/build-desktop.yml` builds everything on GitHub's runners:
+
+1. Push to `main` (or open the Actions tab and run **Build RangeLab desktop apps** manually).
+2. Download the artifacts from the completed run: `RangeLab-firmware-esp32` (flashable `.bin`) and `RangeLab-macos-*` / `RangeLab-windows-*` (desktop installers).
+3. On first use, the macOS build is unsigned. Either right-click → Open, or clear quarantine with `xattr -dr com.apple.quarantine RangeLab.app`, or add Apple signing secrets (see below) for a fully signed, notarized app.
+
+To sign the macOS app properly, add these repository secrets: `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. With an Apple Developer account ($99/year) and these set, builds are signed and notarized and open normally.
 
 ## Safety and limitations
 
