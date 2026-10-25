@@ -114,37 +114,47 @@ If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the
 happens; the `BOOT` counter increments when it comes back. That is how an ESP32-side reset
 or brownout is told apart from a receiver-side dropout.
 
-## 5V rail monitor (optional, for supply troubleshooting)
+## Supply (VIN) monitor (optional, for supply troubleshooting)
 
 Without a wire to the rail, the ESP32 can only *infer* a supply problem from CRSF silence.
-To see the rail itself, add one wire and two resistors at the receiver's 5V pin:
+The board's 3V3 rail is no help — it is regulated down from VIN, so it hides exactly the
+dips you are chasing. Measure VIN (the 5V pin) instead, through a divider into an ADC1
+input:
 
 ```
-receiver 5V ──[10k]──┬── GPIO34 (ADC1)
-                     │
-                   [10k]
-                     │
-                    GND
+VIN / 5V ──[10k]──┬── GPIO34 (ADC1)
+                  │
+                [10k]
+                  │
+                 GND
 ```
 
-Then set `#define RANGELAB_RAIL_ADC 34` near the top of the sketch. Only ADC1 pins work
-while WiFi is on (32, 33, 34, 35, 36, 39); 34/35/36/39 are input-only, which is what this
-wants. Never connect 5V straight to a GPIO — it is a 3.3 V pin. Measure at the load (the
-receiver's 5V pin), not at the BEC output, and keep the grounds common.
+Then set `#define RANGELAB_RAIL_ADC 34` near the top of the sketch. 10k/10k halves the
+rail, so 5.00 V arrives at the pin as 2.50 V — inside the ADC's better 0.5–2.5 V band. Only
+ADC1 pins work while WiFi is on (32, 33, 34, 35, 36, 39); 34/35/36/39 are input-only, which
+is what this wants. Never connect VIN straight to a GPIO (3.3 V pin), and do not feed this
+divider from a rail above ~6 V — 12 V would put 6 V on the pin and destroy the input.
+
+Measure where the load is: the receiver's own 5V pin if it is fed separately, or the board's
+5V/VIN pin if the receiver is powered from it, with a common ground.
+
+Expect a little less than 5 V on a dev board: most have a series Schottky diode from USB,
+so VIN idles around 4.6–4.8 V. The defaults (`RANGELAB_RAIL_LOW_MV` 4400,
+`RANGELAB_RAIL_OK_MV` 4550) are set below that, but if your idle reading differs, set them
+about 250–350 mV under the live **5V RAIL** value.
 
 Once enabled:
 
-- The rail is sampled as often as the main loop allows and printed once a second as
+- VIN is sampled as often as the main loop allows and printed once a second as
   `RAIL,<mV>,<lowest mV since boot>`; the page shows it as **5V RAIL** (green, or red if it
   has ever been low).
-- `PWR_DIP` is recorded when the rail falls below `RAIL_LOW_MV` (4600 mV) and recovers above
-  `RAIL_OK_MV` (4750 mV), with the lowest voltage and the time spent low.
-- `RX_SILENT`, `RX_GAP` and `BOOT` details carry the rail voltage at that moment.
+- `PWR_DIP` is recorded when VIN falls below `RANGELAB_RAIL_LOW_MV` and recovers above
+  `RANGELAB_RAIL_OK_MV`, with the lowest voltage and the time spent low.
+- `RX_SILENT`, `RX_GAP` and `BOOT` details carry the VIN voltage at that moment.
 
-That separates the two cases you care about: `RX_SILENT` with `rail 4400 mV` is a supply
-problem, while `RX_SILENT` with `rail 5000 mV` points at the receiver or its wiring, and
-`RF_LINK_LOST` with a steady rail is RF, not power. Both thresholds are constants at the top
-of the sketch if your rail idles lower than 4.75 V.
+That separates the cases you care about: `RX_SILENT` with `rail 4300 mV` is a supply
+problem, `RX_SILENT` with `rail 4700 mV` points at the receiver or its wiring, and
+`RF_LINK_LOST` with a steady rail is RF, not power.
 
 What this cannot promise:
 
@@ -152,8 +162,13 @@ What this cannot promise:
   sample lands inside it and WiFi/flash work is not blocking the loop. Guaranteed capture of
   sub-millisecond events needs a hardware power-good supervisor wired to a GPIO interrupt,
   which this firmware does not implement.
-- The ESP32 ADC is referenced to its own 3.3 V rail and is accurate to roughly ±20–30 mV; if
-  that rail sags too, the converted values shift with it.
+- The ADC measures against an internal ~1.1 V bandgap (11 dB attenuation gives roughly a
+  0–3.1 V range), not against the 3V3 rail, so it keeps reading while the chip runs. Its
+  accuracy is still poor by instrument standards — a few percent, non-linear near the ends
+  and noisy under WiFi — which is enough to see a 100 mV+ sag, not to certify 5.00 V.
+- The AMS1117 on most dev boards needs roughly 4.4 V in to hold 3.3 V out. VIN below that
+  drags the whole board down with it, and the reading becomes less trustworthy right where
+  it matters. Dips that deep usually end in a reset, which is what the `BOOT` counter shows.
 - If a dip is deep enough to reset the ESP32, no `PWR_DIP` is written — the board is
   rebooting. The next `BOOT` entry increments and its detail shows the rail at start-up,
   which is how that case shows up.

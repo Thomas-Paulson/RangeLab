@@ -39,14 +39,23 @@
 // ---------------------------------------------------------------------------
 #define RANGELAB_WIFI 1  // 0 = USB-only build (no WiFi, no WebSockets library needed)
 
-// Optional 5V rail monitor. The ESP32 cannot see the 5V rail unless it is wired
-// to an ADC input, so this stays off until you add a 1:1 divider and set the pin:
-//   5V rail --[10k]--+--[10k]-- GND
+// Optional supply (VIN) monitor. The 3V3 rail tells you nothing about the 5V feed,
+// so wire a divider from the board's 5V/VIN pin to an ADC1 input and set the pin:
+//   VIN (5V) --[R1]--+--[R2]-- GND
 //                    |
 //                 GPIO34 (ADC1, input-only)
-// ADC1 pins only (32, 33, 34, 35, 36, 39); ADC2 does not work while WiFi is on.
-// Do not feed 5V straight into a GPIO: it is a 3.3V pin.
-#define RANGELAB_RAIL_ADC -1
+// 10k/10k halves it: 5.00V -> 2.50V, inside the ADC's good 0.5-2.5V band.
+// ADC1 only (32, 33, 34, 35, 36, 39): ADC2 cannot be used while WiFi is on, and
+// 34/35/36/39 are input-only, which is what this wants.
+// Never put VIN straight on a GPIO, and never feed this divider from a rail above
+// ~6V: 12V would put 6V on the pin and destroy it.
+// Dev boards often sit around 4.7V on VIN (series diode from USB) and the AMS1117
+// needs ~4.4V to hold 3.3V, so the defaults trip a little below the idle reading.
+// Tune them from the live RAIL value shown on the page (about 250-350mV under it).
+#define RANGELAB_RAIL_ADC -1        // ADC1 pin, or -1 when no divider is fitted
+#define RANGELAB_RAIL_MULTIPLIER 2  // (R1+R2)/R2: 2 for 10k/10k, 3 for 20k/10k
+#define RANGELAB_RAIL_LOW_MV 4400   // a sample below this starts a dip
+#define RANGELAB_RAIL_OK_MV 4550    // hysteresis: back above this ends it
 
 #if RANGELAB_WIFI
 #include <WiFi.h>
@@ -70,10 +79,7 @@ static constexpr size_t EVENT_FILE_MAX = 6000;   // ~150 entries before the olde
 static constexpr uint32_t RX_SILENT_MS = 1000;   // no CRSF bytes at all for this long
 static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
 
-// Rail monitor and short-gap detector (rail constants only apply when wired).
-static constexpr int RAIL_ADC_MULTIPLIER = 2;      // the 1:1 divider halves the measured rail
-static constexpr int RAIL_LOW_MV = 4600;           // a sample below this starts a dip
-static constexpr int RAIL_OK_MV = 4750;            // hysteresis: back above this ends it
+// Rail monitor and short-gap detector (the rail macros live at the top).
 static constexpr uint32_t RAIL_REPORT_MS = 1000;   // live RAIL line cadence
 static constexpr uint32_t RX_GAP_MS = 250;         // CRSF stream pause worth recording
 
@@ -218,7 +224,7 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //                 enough that RX_SILENT does not fire, but an RX reset (usually a
 //                 brownout) looks exactly like this.
 //   PWR_DIP       only when RANGELAB_RAIL_ADC is wired: the 5V rail fell below
-//                 RAIL_LOW_MV and recovered. Carries the lowest measured voltage
+//                 RANGELAB_RAIL_LOW_MV and recovered. Carries the lowest measured voltage
 //                 and how long it stayed low, so a supply problem is provable
 //                 rather than inferred from CRSF silence.
 //   BOOT          ESP32 start-up, numbered: a growing count means resets.
@@ -261,7 +267,7 @@ void dumpEventLog() {
 }
 int readRailMv() {
 #if RANGELAB_RAIL_ADC >= 0
-  return (int)analogReadMilliVolts(RANGELAB_RAIL_ADC) * RAIL_ADC_MULTIPLIER;
+  return (int)analogReadMilliVolts(RANGELAB_RAIL_ADC) * RANGELAB_RAIL_MULTIPLIER;
 #else
   return -1;
 #endif
@@ -281,17 +287,17 @@ void pollRail() {
   const int mv = readRailMv();
   railMv = mv;
   if(railMinMv < 0 || mv < railMinMv) railMinMv = mv;
-  if(!railLow && mv < RAIL_LOW_MV) {
+  if(!railLow && mv < RANGELAB_RAIL_LOW_MV) {
     railLow = true;
     railLowSinceMs = now;
     railDipMinMv = mv;
   } else if(railLow) {
     if(mv < railDipMinMv) railDipMinMv = mv;
-    if(mv >= RAIL_OK_MV) {
+    if(mv >= RANGELAB_RAIL_OK_MV) {
       railLow = false;
       char detail[120];
       snprintf(detail, sizeof(detail), "5V rail dipped to %d mV for %lums (below %d mV)",
-               railDipMinMv, (unsigned long)(now - railLowSinceMs), RAIL_LOW_MV);
+               railDipMinMv, (unsigned long)(now - railLowSinceMs), RANGELAB_RAIL_LOW_MV);
       eventAppend("PWR_DIP", detail);
     }
   }
