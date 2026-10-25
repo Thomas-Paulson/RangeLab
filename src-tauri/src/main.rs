@@ -46,10 +46,13 @@ fn list_serial_ports() -> Result<Vec<PortSummary>, String> {
 #[tauri::command]
 fn connect_serial(app: AppHandle, state: State<'_, AppState>, port_name: String, baud_rate: u32) -> Result<(), String> {
     if baud_rate == 0 { return Err("Baud rate must be greater than zero".into()); }
-    let port = serialport::new(&port_name, baud_rate)
+    let mut port = serialport::new(&port_name, baud_rate)
         .timeout(Duration::from_millis(60))
         .open()
         .map_err(|e| format!("Could not open {port_name}: {e}"))?;
+    // Deassert DTR/RTS so auto-reset circuits don't push the ESP32 into bootloader mode.
+    let _ = port.write_data_terminal_ready(false);
+    let _ = port.write_request_to_send(false);
     let mut reader = port.try_clone().map_err(|e| format!("Could not create serial reader: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_reader = Arc::clone(&stop);
