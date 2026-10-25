@@ -28,11 +28,25 @@ jobs:
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           # WiFi bridge transport (https://github.com/Links2004/arduinoWebSockets)
           arduino-cli lib install "WebSockets"
-      - run: |
+      - name: Compile firmware
+        shell: bash
+        run: |
           # arduino-cli requires the sketch folder to match the .ino name
           mkdir -p sketch/RangeLab_ESP32
           cp firmware/RangeLab_ESP32.ino firmware/web_assets.h sketch/RangeLab_ESP32/
-          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build sketch/RangeLab_ESP32 --warnings default
+          set +e
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build sketch/RangeLab_ESP32 --warnings default 2>&1 | tee compile.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Surface the real compiler errors as run annotations: job logs need
+            # repository admin, annotations are readable by anyone who can see the repo.
+            grep -E 'error:|undefined reference|too big|multiple definition|fatal error' compile.log \
+              | head -12 | cut -c1-300 \
+              | while IFS= read -r line; do echo "::error title=firmware compile::${line//$'\n'/ }"; done
+            { echo '### Firmware compile failed'; echo '```'; tail -25 compile.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
+          tail -3 compile.log | grep -E 'Sketch uses|Global variables' || true
       - uses: actions/upload-artifact@v4
         with:
           name: RangeLab-firmware-esp32
