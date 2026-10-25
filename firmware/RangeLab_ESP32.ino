@@ -192,6 +192,9 @@ static constexpr uint16_t HTTP_PORT = 80;
 static constexpr uint16_t WS_PORT = 81;
 static constexpr uint32_t CONTROL_IDLE_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 static constexpr size_t WS_LINE_MAX = 600;
+static constexpr uint32_t HTTP_HEAD_MS = 100;   // a client's chance to send its request line
+static constexpr uint32_t HTTP_SEND_MS = 4000; // hard limit for one response, watchdog included
+static constexpr size_t HTTP_CHUNK = 512;      // bytes per write before the loop is serviced
 
 WebSocketsServer webSocket(WS_PORT);
 WiFiServer httpServer(HTTP_PORT);
@@ -818,11 +821,35 @@ void onWebSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t le
   }
 }
 
-void sendHttp(WiFiClient &client, const char *status, const char *mime, const char *body) {
-  const size_t length = strlen(body);
-  client.printf("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %u\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                status, mime, (unsigned)length);
-  if(length) client.write((const uint8_t*)body, length);
+// Serving a page must not stop the receiver. The UART buffer holds about 24 ms of
+// CRSF traffic, and a phone that is waiting on a socket still wants its frames,
+// so every wait and every write below gives the rest of the firmware a turn.
+void serviceFastPath() {
+  pollRail(); pollPwrGood(); pollCrsf(); pollWire(); processResume();
+  webSocket.loop();
+}
+
+void sendHttp(WiFiClient &client, const char *status, const char *mime, const char *body, size_t length) {
+  char head[160];
+  const int headLen = snprintf(head, sizeof(head),
+      "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %u\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+      status, mime, (unsigned)length);
+  if(headLen > 0) client.write((const uint8_t*)head, (size_t)headLen);
+  // A phone on a marginal link can accept a few kilobytes at a time. Writing the
+  // whole asset in one call blocks until it drains, which stalls the RC loop and
+  // can trip the watchdog, so the body goes out in chunks with a hard deadline.
+  const uint32_t deadline = millis() + HTTP_SEND_MS;
+  size_t sent = 0;
+  while(sent < length) {
+    if(!client.connected()) return;                    // the phone gave up; nothing to flush
+    if((int32_t)(millis() - deadline) > 0) break;      // one slow client must not own the loop
+    size_t chunk = length - sent;
+    if(chunk > HTTP_CHUNK) chunk = HTTP_CHUNK;
+    const size_t wrote = client.write((const uint8_t*)body + sent, chunk);
+    if(wrote == 0) { serviceFastPath(); delay(1); continue; }
+    sent += wrote;
+    serviceFastPath();
+  }
   client.flush();
   client.stop();
 }
@@ -830,16 +857,21 @@ void sendHttp(WiFiClient &client, const char *status, const char *mime, const ch
 void serveHttpRequest() {
   WiFiClient client = httpServer.available();
   if(!client) return;
-  client.setTimeout(150);
+  client.setNoDelay(true);
+  client.setTimeout(HTTP_HEAD_MS);
   String requestLine;
-  const uint32_t started = millis();
-  while(client.connected() && millis()-started < 250) {
-    if(!client.available()) { pollRail(); delay(1); continue; }
+  const uint32_t deadline = millis() + HTTP_HEAD_MS;
+  while(client.connected() && (int32_t)(millis() - deadline) < 0) {
+    if(!client.available()) { serviceFastPath(); delay(1); continue; }
     const int c = client.read();
     if(c<0) break;
     if(c=='\n') break;
     if(c!='\r' && requestLine.length()<160) requestLine+=(char)c;
   }
+  // Browsers open several sockets at once, most of them silent preconnects. Waiting
+  // on those starves the receiver and delays the requests that matter, so a socket
+  // that says nothing in its window is dropped instead of awaited.
+  if(!requestLine.length()) { client.stop(); return; }
   const int firstSpace = requestLine.indexOf(' ');
   const int secondSpace = firstSpace<0 ? -1 : requestLine.indexOf(' ', firstSpace+1);
   String path = "/";
@@ -847,11 +879,12 @@ void serveHttpRequest() {
   const int query = path.indexOf('?');
   if(query>=0) path = path.substring(0, query);
 
-  if(path=="/"||path=="/index.html") sendHttp(client,"200 OK","text/html; charset=utf-8",INDEX_HTML);
-  else if(path=="/bridge.js") sendHttp(client,"200 OK","text/javascript; charset=utf-8",BRIDGE_JS);
-  else if(path=="/app.js") sendHttp(client,"200 OK","text/javascript; charset=utf-8",APP_JS);
-  else if(path=="/health") sendHttp(client,"200 OK","text/plain","ok");
-  else sendHttp(client,"404 Not Found","text/plain","not found");
+  if(path=="/"||path=="/index.html") sendHttp(client,"200 OK","text/html; charset=utf-8",INDEX_HTML,strlen(INDEX_HTML));
+  else if(path=="/bridge.js") sendHttp(client,"200 OK","text/javascript; charset=utf-8",BRIDGE_JS,strlen(BRIDGE_JS));
+  else if(path=="/app.js") sendHttp(client,"200 OK","text/javascript; charset=utf-8",APP_JS,strlen(APP_JS));
+  else if(path=="/health") sendHttp(client,"200 OK","text/plain","ok",2);
+  else if(path=="/favicon.ico") sendHttp(client,"204 No Content","text/plain","",0);
+  else sendHttp(client,"404 Not Found","text/plain","not found",9);
 }
 
 void startWifiBridge() {
