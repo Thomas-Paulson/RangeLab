@@ -193,7 +193,9 @@ function render() {
   const railCell = el('rail');
   const railLabel = el('rail-label');
   if (!state.rail) {
-    railCell.textContent = 'not monitored';
+    // No RAIL line means this build has no ADC tap configured, so say why rather
+    // than leaving a blank cell that looks like a fault.
+    railCell.textContent = 'no divider fitted';
     railCell.className = '';
     railLabel.textContent = '5V RAIL';
   } else {

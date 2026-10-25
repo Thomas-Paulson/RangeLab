@@ -93,13 +93,20 @@ model and limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.
 
+The prebuilt image is compiled with `RANGELAB_RAIL_ADC -1`, so it does not measure the 5V rail: the page shows **5V RAIL · no divider fitted** and no `PWR_DIP` events. Enabling that needs both a divider across the receiver's 5V pin and a rebuild with the pin set — see [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md). Link and cable diagnosis (dropouts, `RX_RESTART`, `WIRE_NOISE`) need no extra hardware and work in the prebuilt image.
+
 ## Build in the cloud (GitHub Actions)
 
 You do not need a local toolchain. The workflow `.github/workflows/build-desktop.yml` builds everything on GitHub's runners:
 
-1. Push to `main` (or open the Actions tab and run **Build RangeLab desktop apps** manually).
-2. Download the artifacts from the completed run: `RangeLab-firmware-esp32` (flashable `.bin`) and `RangeLab-macos-*` / `RangeLab-windows-*` (desktop installers).
-3. On first use, the macOS build is unsigned. Either right-click → Open, or clear quarantine with `xattr -dr com.apple.quarantine RangeLab.app`, or add Apple signing secrets (see below) for a fully signed, notarized app.
+1. Push to `main` or `mobile-wifi` (or open the Actions tab and run **Build RangeLab desktop apps** manually).
+2. **Firmware:** every successful build publishes the merged image as a plain file — no unzipping, no offsets:
+   [RangeLab-ESP32-firmware.bin](https://github.com/Thomas-Paulson/RangeLab/releases/download/firmware-mobile-wifi/RangeLab-ESP32-firmware.bin)
+   (from the `mobile-wifi` branch; `main` publishes under `firmware-main`). Flash it at **0x0**:
+   `python -m esptool --chip esp32 --port COM5 --baud 460800 write_flash 0x0 RangeLab-ESP32-firmware.bin`.
+   The run's `RangeLab-firmware-esp32` artifact still holds the separate bootloader, partition and app images if you prefer those.
+3. **Desktop:** download `RangeLab-macos-*` / `RangeLab-windows-*` from the completed run's artifacts.
+4. On first use, the macOS build is unsigned. Either right-click → Open, or clear quarantine with `xattr -dr com.apple.quarantine RangeLab.app`, or add Apple signing secrets (see below) for a fully signed, notarized app.
 
 To sign the macOS app properly, add these repository secrets: `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. With an Apple Developer account ($99/year) and these set, builds are signed and notarized and open normally.
 

@@ -15,6 +15,8 @@ on:
 jobs:
   firmware:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # publish the merged image as a release asset
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,6 +55,22 @@ jobs:
           path: build/*.bin
           if-no-files-found: error
           retention-days: 14
+      # Artifacts are always delivered zipped. A release asset downloads as the
+      # bare file, which is what you want when the only step left is flashing it.
+      - name: Publish the merged image as a release asset
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: firmware-${{ github.ref_name }}
+        run: |
+          cp build/*.merged.bin RangeLab-ESP32-firmware.bin
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "RangeLab firmware — ${{ github.ref_name }}" \
+            --notes "Single merged image, flash at 0x0. Built from ${{ github.sha }}." \
+            --target "${{ github.sha }}" \
+            --prerelease
+          gh release upload "$TAG" RangeLab-ESP32-firmware.bin --clobber
+          echo "Download: ${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG/RangeLab-ESP32-firmware.bin"
 
   build:
     strategy:

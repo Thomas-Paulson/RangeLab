@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 13329 bytes
+// 13333 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -171,7 +171,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <div><span>LINK</span><strong id="link">no frames yet</strong></div>
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
-      <div><span id="rail-label">5V RAIL</span><strong id="rail">not monitored</strong></div>
+      <div><span id="rail-label">5V RAIL</span><strong id="rail">no divider fitted</strong></div>
       <div><span>RX UART</span><strong id="wire">waiting</strong></div>
     </div>
     <div class="actions">
@@ -539,7 +539,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 14677 bytes
+// 14821 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -735,7 +735,9 @@ function render() {
   const railCell = el('rail');
   const railLabel = el('rail-label');
   if (!state.rail) {
-    railCell.textContent = 'not monitored';
+    // No RAIL line means this build has no ADC tap configured, so say why rather
+    // than leaving a blank cell that looks like a fault.
+    railCell.textContent = 'no divider fitted';
     railCell.className = '';
     railLabel.textContent = '5V RAIL';
   } else {
@@ -976,6 +978,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 39483;
+static constexpr size_t WEB_ASSETS_BYTES = 39631;
 
 #endif  // RANGELAB_WEB_ASSETS_H

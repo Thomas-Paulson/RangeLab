@@ -148,6 +148,11 @@ VIN / 5V ──[10k]──┬── GPIO34 (ADC1)
                  GND
 ```
 
+Two things are needed, not one: the divider **and** a build with the pin set. Until the
+sketch says `#define RANGELAB_RAIL_ADC 34`, the firmware samples nothing at all, prints no
+`RAIL` lines and the page shows **5V RAIL · no divider fitted** — the prebuilt image in the
+release is that build. Wiring the divider alone changes nothing until you rebuild.
+
 Then set `#define RANGELAB_RAIL_ADC 34` near the top of the sketch. 10k/10k halves the
 rail, so 5.00 V arrives at the pin as 2.50 V — inside the ADC's better 0.5–2.5 V band. Only
 ADC1 pins work while WiFi is on (32, 33, 34, 35, 36, 39); 34/35/36/39 are input-only, which
