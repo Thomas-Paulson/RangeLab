@@ -16,14 +16,15 @@ const SOURCES = [
   { file: 'app.js', symbol: 'APP_JS', mime: 'text/javascript; charset=utf-8' },
 ];
 
-function loadSource({ file }) {
+function loadSource(source) {
+  const { file } = source;
   const body = readFileSync(join(root, 'mobile', file), 'utf8');
   const delimiter = `RL_${file.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}`;
   if (body.includes('\0')) throw new Error(`${file} contains a NUL byte and cannot be embedded`);
   if (body.includes(`)${delimiter}"`)) {
     throw new Error(`${file} contains the raw-string terminator )${delimiter}" — pick another delimiter`);
   }
-  return { file, body, delimiter, bytes: Buffer.byteLength(body, 'utf8') };
+  return { ...source, body, delimiter, bytes: Buffer.byteLength(body, 'utf8') };
 }
 
 const assets = SOURCES.map((source) => loadSource(source));
@@ -49,6 +50,14 @@ const header = [
   '#endif  // RANGELAB_WEB_ASSETS_H',
   '',
 ].join('\n');
+
+// A missing symbol would silently emit `const char undefined[]` and the sketch
+// would fail with "redefinition of 'const char undefined []'". Fail loudly here.
+for (const { symbol } of assets) {
+  if (!symbol || !header.includes(`const char ${symbol}[]`)) {
+    throw new Error(`generated header is missing a declaration for ${symbol || 'an unnamed asset'}`);
+  }
+}
 
 if (process.argv.includes('--check')) {
   let current = '';

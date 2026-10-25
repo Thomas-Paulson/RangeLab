@@ -34,7 +34,42 @@
 #include <WiFi.h>
 #include <WebSocketsServer.h>
 #include "web_assets.h"  // generated from mobile/ by `npm run mobile:embed`
+#endif
 
+// ---------------------------------------------------------------------------
+// Device state
+// ---------------------------------------------------------------------------
+// Field logging: armed by LOG START, survives restarts, wraps at LOG_FILE_MAX bytes
+// with an OVERFLOW marker so the app can tell data was overwritten.
+static constexpr size_t LOG_FILE_MAX = 1800000; // ~30-40 min at 10 Hz
+static constexpr const char* LOG_PATH = "/fieldlog.csv";
+
+static constexpr int CRSF_RX_PIN = 16;
+static constexpr uint32_t USB_BAUD = 115200;
+static constexpr uint32_t CRSF_BAUD = 420000;
+static constexpr uint32_t RC_TIMEOUT_MS = 500;
+static constexpr uint32_t LOG_PERIOD_MS = 100; // 10 Hz field logging
+static constexpr uint8_t CRSF_RC_CHANNELS = 0x16;
+static constexpr uint8_t CRSF_LINK_STATISTICS = 0x14;
+static constexpr uint8_t SAFE_PINS[] = {13,14,17,18,19,21,22,23,25,26,27,32,33};
+static constexpr size_t SAFE_PIN_COUNT = sizeof(SAFE_PINS) / sizeof(SAFE_PINS[0]);
+
+enum OutputMode : uint8_t { MODE_OFF, MODE_SERVO, MODE_PWM, MODE_DIGITAL, MODE_WINDOW, MODE_CURVE };
+struct Mapping { uint16_t inMin=1000, inMax=2000; OutputMode mode=MODE_OFF; int8_t pin=-1; uint16_t outLow=1000, outHigh=2000; uint16_t curve[5]={1000,1250,1500,1750,2000}; };
+Mapping mappings[16];
+uint16_t channels[16];
+Preferences prefs;
+HardwareSerial CRSF(2);
+uint8_t frame[80]; size_t frameLen=0;
+uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
+String usbLine;
+bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
+
+// The console printer and its WebSocket capture live below the type
+// declarations on purpose: arduino-cli injects auto-generated prototypes just
+// before the first function definition, so a function defined above the
+// OutputMode enum makes those prototypes fail to compile.
+#if RANGELAB_WIFI
 // Change this before flashing anything you care about: it is the only thing
 // standing between the network and the ENABLE command.
 static constexpr const char* WIFI_AP_PREFIX = "RangeLab";
@@ -89,35 +124,6 @@ class DualPrint : public Print {
 
 DualPrint bridgeConsole;
 #define Console bridgeConsole
-
-// ---------------------------------------------------------------------------
-// Device state
-// ---------------------------------------------------------------------------
-// Field logging: armed by LOG START, survives restarts, wraps at LOG_FILE_MAX bytes
-// with an OVERFLOW marker so the app can tell data was overwritten.
-static constexpr size_t LOG_FILE_MAX = 1800000; // ~30-40 min at 10 Hz
-static constexpr const char* LOG_PATH = "/fieldlog.csv";
-
-static constexpr int CRSF_RX_PIN = 16;
-static constexpr uint32_t USB_BAUD = 115200;
-static constexpr uint32_t CRSF_BAUD = 420000;
-static constexpr uint32_t RC_TIMEOUT_MS = 500;
-static constexpr uint32_t LOG_PERIOD_MS = 100; // 10 Hz field logging
-static constexpr uint8_t CRSF_RC_CHANNELS = 0x16;
-static constexpr uint8_t CRSF_LINK_STATISTICS = 0x14;
-static constexpr uint8_t SAFE_PINS[] = {13,14,17,18,19,21,22,23,25,26,27,32,33};
-static constexpr size_t SAFE_PIN_COUNT = sizeof(SAFE_PINS) / sizeof(SAFE_PINS[0]);
-
-enum OutputMode : uint8_t { MODE_OFF, MODE_SERVO, MODE_PWM, MODE_DIGITAL, MODE_WINDOW, MODE_CURVE };
-struct Mapping { uint16_t inMin=1000, inMax=2000; OutputMode mode=MODE_OFF; int8_t pin=-1; uint16_t outLow=1000, outHigh=2000; uint16_t curve[5]={1000,1250,1500,1750,2000}; };
-Mapping mappings[16];
-uint16_t channels[16];
-Preferences prefs;
-HardwareSerial CRSF(2);
-uint8_t frame[80]; size_t frameLen=0;
-uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
-String usbLine;
-bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
 
 void closeLogFile(){ if(logFile) logFile.close(); }
 void openLogFile(){

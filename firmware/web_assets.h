@@ -7,7 +7,7 @@
 #include <Arduino.h>
 
 // 9903 bytes
-static const char undefined[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
+static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -228,7 +228,7 @@ static const char undefined[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 )RL_INDEX_HTML";
 
 // 7708 bytes
-static const char undefined[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
+static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
 // code the phone runs. The firmware on this branch mirrors the same line
@@ -411,7 +411,7 @@ export function pulsePercent(value) {
 )RL_BRIDGE_JS";
 
 // 10547 bytes
-static const char undefined[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
+static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
 
