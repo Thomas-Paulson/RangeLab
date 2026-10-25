@@ -1,0 +1,15 @@
+RangeLab standalone native desktop application
+
+1. Extract this ZIP.
+2. Open the rangelab folder.
+3. Read README.md and docs/WIRING.md before wiring hardware.
+4. Flash firmware/RangeLab_ESP32.ino to your ESP32-WROOM using Arduino IDE 2 and Arduino-ESP32 core 3.x.
+5. Install Node.js 20+ and Rust stable, plus the Tauri 2 prerequisites for your OS.
+6. In a terminal inside rangelab:
+     npm install
+     npm test
+     npm run desktop:dev
+   To build an installer, run:
+     npm run desktop:build
+
+This is a source package. It does not contain a precompiled installer. Desktop tests pass, but this package has not been compiled or hardware-tested here. Check the safety notes in README.md before enabling GPIO outputs.

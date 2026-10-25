@@ -1,88 +1,69 @@
-# RangeLab · ESP32 Configuration Studio
+# RangeLab
 
-A cross-platform desktop workbench for ESP32-WROOM, ELRS/CRSF telemetry bridges and ESP-FC-style CLI workflows. The application is built with React + TypeScript and packaged as a native desktop app with Tauri 2 and Rust serial I/O. The interface uses system fonts and does not require external font requests at runtime.
+RangeLab is a standalone native desktop application for monitoring an ExpressLRS/CRSF receiver through an ESP32-WROOM and mapping receiver channels to safe-listed ESP32 GPIO outputs. It is independent of ESP-FC.
 
-## Current capabilities
+## Package contents
 
-- Native serial-port discovery, connect/disconnect, baud selection and streamed serial output.
-- Live parsing for the ASCII bridge lines `CH,...`, `LINK,...` and `STATUS,...`.
-- 16-channel pulse monitor with range status and live update timestamps.
-- Range editor for `input_min`, `input_mid` and `input_max`, plus validated profile import/export and profile selection.
-- CLI console with session history, Up/Down command recall and log export.
-- Firmware-family identification from received output, with a read-only `version` probe. Range writes are blocked when the app identifies Betaflight or a telemetry-only bridge; unknown firmware requires confirmation.
-- Editable, cancellable command macros for repeatable read/diagnostic workflows, limited to 100 commands per run and guarded before destructive commands such as `save`, `reboot`, and `defaults`.
-- Diagnostics page with raw serial data and transport state.
-- GitHub Actions matrix for Windows and Apple Silicon / Intel macOS builds.
+- `src/` React + TypeScript desktop interface.
+- `src-tauri/` Tauri 2 / Rust native desktop shell and serial-port transport.
+- `firmware/RangeLab_ESP32.ino` ESP32-WROOM CRSF receiver bridge and output mapper firmware.
+- `docs/` wiring and build notes.
+- `.github/workflows/build-desktop.yml` Windows and macOS build workflow.
 
-## Important protocol note
+## Hardware wiring
 
-RangeLab currently supports the ASCII telemetry bridge format emitted by the user's ESP32 monitor sketch. It does **not** claim to decode raw CRSF frames directly from USB. The ESP32 firmware/bridge must decode the receiver UART and forward lines such as:
+1. Flash `firmware/RangeLab_ESP32.ino` to an ESP32-WROOM development board using Arduino IDE 2 and Arduino-ESP32 core 3.x.
+2. Connect the receiver's **CRSF TX** to ESP32 **GPIO16 (UART2 RX)** and connect receiver ground to ESP32 ground. Power the receiver from a suitable supply matching its specifications.
+3. Connect the ESP32 to the computer over USB. The desktop app communicates at 115200 baud; the receiver UART is configured at 420000 baud.
+4. Select the ESP32 serial port in RangeLab and press **Connect**.
 
-```text
-CH,1500,1500,1000,1500,1500,1500,1500,1500,1500,1500,1500,1500,1500,1500,1500,1500
-LINK,-68,92,9
-STATUS,receiver online
-```
-
-The CLI is a raw serial console. Range writes send `set input_min`, `set input_mid`, and `set input_max` commands, but they do not automatically save or reboot. Review the device's response before issuing `save` manually.
-
-## Requirements
-
-- Node.js 20+ (Node 22 recommended)
-- Rust stable toolchain
-- Tauri 2 platform prerequisites
-
-See the official [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for the OS-specific native dependencies.
+The receiver UART wiring is receive-only in this firmware. Do not connect a receiver output to GPIO16 if your board uses that pin for another purpose.
 
 ## Run in development
 
-```bash
+Requirements: Node.js 20 or newer, Rust stable, and the Tauri 2 platform prerequisites for your OS. See https://v2.tauri.app/start/prerequisites/.
+
+```sh
 npm install
+npm test
 npm run desktop:dev
-```
-
-For a UI-only browser preview (serial access disabled):
-
-```bash
-npm run dev
 ```
 
 ## Build a native installer
 
-```bash
-npm install
+```sh
 npm run desktop:build
 ```
 
-Tauri places the platform-specific installer in `src-tauri/target/release/bundle/`. Windows produces an NSIS installer; macOS produces a DMG. For a distributable signed app, code signing/notarization credentials are still required by the respective platforms.
+Installer bundles are created under `src-tauri/target/release/bundle/`. Windows and macOS builds should be built on their respective operating systems. The included GitHub Actions workflow builds Windows and macOS artifacts when run in the repository. The ZIP contains source code and build configuration, not precompiled signed installers.
 
-## Architecture
+## Using channel mapping
 
-- `src/App.tsx`: UI, navigation, profile editor, CLI and macro runner.
-- `src/lib/protocol.ts`: ASCII bridge parser and telemetry state.
-- `src/lib/firmware.ts`: conservative firmware-family detection from received serial output.
-- `src-tauri/src/main.rs`: native serial port listing, reader thread and write commands.
-- `src-tauri/icons/`: native Windows and macOS application icons.
-- `.github/workflows/build-desktop.yml`: CI build matrix.
+1. Connect the device and select a channel.
+2. Set input min/max, output mode, GPIO and output range.
+3. Press **Apply mapping**. The firmware validates and stores each mapping in ESP32 Preferences.
+4. Repeat for other channels. One active mapping per GPIO is enforced.
+5. Check every mapping and the attached hardware before pressing **Enable outputs**. **Disable now** turns outputs off immediately.
+6. Export/import JSON profiles to keep a local copy of settings. Importing a profile changes the editor only; apply mappings to send them to the ESP32.
 
-## Tests
+The supported output modes are `OFF`, `SERVO`, `PWM`, and `DIGITAL`. GPIOs are restricted to 13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32 and 33. The firmware disables outputs on startup and uses a 500 ms receiver timeout. Servo outputs use a 50 Hz LEDC signal, PWM uses 1 kHz 8-bit output, and digital mode switches at the input range midpoint.
 
-Run the protocol parser tests with Node 22:
+## Safety and limitations
 
-```bash
-npm test
+- This is an RC receiver-to-GPIO mapper, not a flight controller and not a tool for changing ExpressLRS RF/binding settings.
+- ESP32 GPIO pins are logic-level signals. Do not power servos, motors, relays or other loads directly from a GPIO. Use suitable driver circuitry and a correctly rated external supply; share ground where required.
+- Verify firmware behavior on your specific ESP32 board and receiver before connecting anything capable of causing injury or damage. Test with outputs disconnected first.
+- Firmware and application are source-provided; this package has not been compiled and hardware-tested in this environment. The included CI workflow can build the desktop app, but a successful build is not proof of hardware validation.
+
+## Project structure
+
+```text
+rangelab/
+├── firmware/RangeLab_ESP32.ino
+├── src/                  # React UI and protocol handling
+├── src-tauri/            # Native Rust serial transport and Tauri config
+├── tests/                # Parser/profile/firmware identification tests
+├── docs/                 # Wiring and troubleshooting
+├── scripts/              # Convenience build scripts
+└── README.md
 ```
-
-The current test suite contains 12 tests across telemetry parsing, profile validation/import and firmware identification. The GitHub Actions workflow runs these tests before packaging and uploads the generated installer bundles as downloadable workflow artifacts for 14 days.
-
-## Build status
-
-This repository contains the source project and native packaging configuration, not precompiled installers. A build has not been executed in this environment because the Rust toolchain is unavailable and dependency installation did not complete. The included CI workflow can compile macOS (Apple Silicon and Intel) and Windows packages when run in GitHub Actions.
-
-## Next milestones
-
-1. Add an MSP transport and capability handshake so Betaflight-compatible firmware can expose supported tabs and settings without guessing.
-2. Add a versioned device adapter interface for ESP-FC, the ASCII bridge, and future custom firmware.
-3. Persist profiles and macros to disk, with import validation and schema migrations.
-4. Add a verified firmware parameter map, per-channel ranges, AUX mode ranges, and explicit diff/apply/save/rollback workflow.
-5. Add tests with recorded serial fixtures and a virtual-device simulator.
