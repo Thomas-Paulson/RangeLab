@@ -69,6 +69,7 @@ jobs:
       # macOS signing and notarization. Only exported when the secrets exist,
       # because empty env vars make Tauri attempt a signing/notarization that fails.
       - name: Configure Apple signing (optional)
+        shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
