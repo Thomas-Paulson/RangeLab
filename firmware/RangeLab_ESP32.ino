@@ -17,6 +17,11 @@
   RAIL,<mV>,<min mV> once a second. Without that wire the ESP32 cannot see the
   5V rail at all: receiver silence only proves the CRSF stream stopped, not why.
 
+  Sampling cannot guarantee a millisecond-long rub is seen. For that, feed an
+  active-low supply supervisor/comparator into RANGELAB_PWRGOOD_PIN: the GPIO
+  edge is latched by hardware and counted by an ISR as PWR_GLITCH, whenever it
+  happens. BOOT also records the reset reason, so a brownout reset is named.
+
   Safety: outputs are DISABLED on boot and after 500 ms without valid RC frames.
           Over WiFi, outputs and mapping writes stay locked until the app sends
           UNLOCK; DISABLE is always accepted.
@@ -33,6 +38,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <LittleFS.h>
+#include <esp_system.h>  // esp_reset_reason(): tell a brownout reset from a normal one
 
 // ---------------------------------------------------------------------------
 // Transports
@@ -56,6 +62,18 @@
 #define RANGELAB_RAIL_MULTIPLIER 2  // (R1+R2)/R2: 2 for 10k/10k, 3 for 20k/10k
 #define RANGELAB_RAIL_LOW_MV 4400   // a sample below this starts a dip
 #define RANGELAB_RAIL_OK_MV 4550    // hysteresis: back above this ends it
+
+// Optional power-good latch input. The ADC cannot promise to see a rub that lasts
+// a millisecond, but a GPIO edge is latched in hardware and reaches an ISR even
+// while the loop is blocked, so anything that pulls this pin low is counted.
+// Wire a supply supervisor or comparator with an active-low output here:
+//   supervisor /RESET (open-drain) --+-- GPIO35 (input-only)
+//                                    |
+//                               10k to 3V3 (external: 34/35/36/39 have no pull-up)
+// A supervisor includes its own reset delay in the reported duration; use a
+// comparator if you need the true dip length. Pick a pin that is neither the ADC
+// tap nor one of the SAFE_PINS outputs.
+#define RANGELAB_PWRGOOD_PIN -1     // GPIO, or -1 when not wired
 
 #if RANGELAB_WIFI
 #include <WiFi.h>
@@ -81,7 +99,7 @@ static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
 
 // Rail monitor and short-gap detector (the rail macros live at the top).
 static constexpr uint32_t RAIL_REPORT_MS = 1000;   // live RAIL line cadence
-static constexpr uint32_t RX_GAP_MS = 250;         // CRSF stream pause worth recording
+static constexpr uint32_t RX_GAP_MS = 150;         // CRSF stream pause worth recording
 
 static constexpr int CRSF_RX_PIN = 16;
 static constexpr uint32_t USB_BAUD = 115200;
@@ -112,6 +130,11 @@ static constexpr size_t LINK_POINTS = 24;
 static constexpr uint32_t LINK_POINT_MS = 100;
 LinkPoint linkPoints[LINK_POINTS];
 size_t linkHead=0, linkCount=0; uint32_t lastLinkPointMs=0; uint32_t rfLostAtMs=0;
+#if RANGELAB_PWRGOOD_PIN >= 0
+// Written by the ISR, read by the loop; both are 32-bit/1-bit so the access is atomic.
+volatile uint32_t pwrGoodEdges=0;
+volatile bool pwrGoodLow=false;
+#endif
 // Event detection state. rxSilent stays true until the receiver has sent bytes at
 // least once, so a board that boots with no receiver attached logs BOOT only.
 uint32_t lastCrsfByteMs=0; uint32_t lastLinkStatMs=0; uint32_t lastEventScanMs=0;
@@ -220,14 +243,19 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //   RF_LINK_OK    link quality is back, with how long it was gone.
 //   RC_LOST       channel frames stopped while the receiver keeps transmitting.
 //   RC_OK         channel frames are back.
-//   RX_GAP        the CRSF stream paused for 250 ms-1 s, then resumed: short
+//   RX_GAP        the CRSF stream paused for 150 ms-1 s, then resumed: short
 //                 enough that RX_SILENT does not fire, but an RX reset (usually a
 //                 brownout) looks exactly like this.
 //   PWR_DIP       only when RANGELAB_RAIL_ADC is wired: the 5V rail fell below
 //                 RANGELAB_RAIL_LOW_MV and recovered. Carries the lowest measured voltage
 //                 and how long it stayed low, so a supply problem is provable
 //                 rather than inferred from CRSF silence.
-//   BOOT          ESP32 start-up, numbered: a growing count means resets.
+//   PWR_GLITCH    only when RANGELAB_PWRGOOD_PIN is wired: a hardware-latched
+//                 assertion of the supervisor output, counted even if the loop was
+//                 busy. This is the event that catches a sub-millisecond rub.
+//   PWR_OK        the power-good line came back high, with how long it was low.
+//   BOOT          ESP32 start-up, numbered and with its reset reason (brownout,
+//                 panic, watchdog, power-on...): a growing count means resets.
 // ---------------------------------------------------------------------------
 void compactEventLog() {
   File in = LittleFS.open(EVENT_PATH, "r");
@@ -390,13 +418,61 @@ void dumpLinkTrace() {
   }
   Console.println("TRACE_END");
 }
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch(r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external reset";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "sdio";
+    default: return "unknown";
+  }
+}
+#if RANGELAB_PWRGOOD_PIN >= 0
+// Active-low supervisor output. The GPIO peripheral latches the edge, so even a
+// microsecond dip lands here while the main loop is blocked in WiFi or flash.
+void IRAM_ATTR onPwrGoodEdge() {
+  if(digitalRead(RANGELAB_PWRGOOD_PIN) == LOW) { pwrGoodEdges++; pwrGoodLow = true; }
+  else pwrGoodLow = false;
+}
+#endif
+void pollPwrGood() {
+#if RANGELAB_PWRGOOD_PIN >= 0
+  static uint32_t logged = 0;
+  static bool wasLow = false;
+  static uint32_t lowSince = 0;
+  const uint32_t seen = pwrGoodEdges;
+  const bool low = pwrGoodLow;
+  if(seen != logged) {
+    char detail[110];
+    snprintf(detail, sizeof(detail), "%lu power-good assertion(s); line now %s%s",
+             (unsigned long)(seen - logged), low ? "low" : "high", railNote().c_str());
+    logged = seen;
+    eventAppend("PWR_GLITCH", detail);
+  }
+  if(low && !wasLow) lowSince = millis();
+  if(!low && wasLow) {
+    char detail[110];
+    snprintf(detail, sizeof(detail), "power-good high again after %lums%s",
+             (unsigned long)(millis() - lowSince), railNote().c_str());
+    eventAppend("PWR_OK", detail);
+  }
+  wasLow = low;
+#endif
+}
 void logBootEvent() {
   prefs.begin("rangelab", false);
   bootCount = prefs.getUShort("boots", 0) + 1;
   prefs.putUShort("boots", bootCount);
   prefs.end();
-  char detail[64];
-  snprintf(detail, sizeof(detail), "esp32 boot #%u%s", (unsigned)bootCount, railNote().c_str());
+  char detail[96];
+  snprintf(detail, sizeof(detail), "esp32 boot #%u (%s)%s",
+           (unsigned)bootCount, resetReasonName(esp_reset_reason()), railNote().c_str());
   eventAppend("BOOT", detail);
 }
 void scanEvents() {
@@ -672,13 +748,17 @@ void setup(){Serial.begin(USB_BAUD);
 #endif
   CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();
   railInit();
+#if RANGELAB_PWRGOOD_PIN >= 0
+  pinMode(RANGELAB_PWRGOOD_PIN, INPUT);  // input-only pins have no internal pull-up
+  attachInterrupt(digitalPinToInterrupt(RANGELAB_PWRGOOD_PIN), onPwrGoodEdge, CHANGE);
+#endif
   logBootEvent();
   if(logArmed){openLogFile();Console.println("STATUS,LOG_ARMED_FIELD_MODE");}
 #if RANGELAB_WIFI
   startWifiBridge();
 #endif
   Console.println("READY,RangeLab-ESP32,1");Console.println("STATUS,OUTPUTS_DISABLED_ON_BOOT");}
-void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollCrsf();flushGapEvent();
+void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollPwrGood();pollCrsf();flushGapEvent();
   while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
   bool failsafe=millis()-lastRcMs>RC_TIMEOUT_MS;if(failsafe&&!wasFailsafe){for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.println("STATUS,RC_FAILSAFE_OUTPUTS_NEUTRAL");}wasFailsafe=failsafe;
   if(logArmed&&millis()-lastLogMs>=LOG_PERIOD_MS){lastLogMs=millis();logSample();}

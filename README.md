@@ -75,7 +75,9 @@ flash (`RX_SILENT` for a receiver that stopped transmitting, `RX_GAP` for a shor
 stream pause such as an RX brownout, `RF_LINK_LOST` for a lost RF link, `BOOT` for an ESP32
 restart), and can clear it once unlocked. Add a 10k/10k divider from the 5V/VIN feed
 to GPIO34 and set `RANGELAB_RAIL_ADC` to 34 to record actual **supply dips** (`PWR_DIP`) and
-show the live VIN voltage on the page. Field-log download stays on USB. Full setup, safety
+show the live VIN voltage on the page. A supply supervisor or comparator on a GPIO
+(`RANGELAB_PWRGOOD_PIN`) latches dips too short to sample, and `BOOT` records the last reset
+reason so a brownout reset is named rather than guessed. Field-log download stays on USB. Full setup, safety
 model and limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.

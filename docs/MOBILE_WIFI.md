@@ -89,8 +89,10 @@ phone alone. The page loads the log when it connects; **Load events** re-reads i
 | `RF_LINK_OK` | Link quality is back. |
 | `RC_LOST` | Channel frames stopped while the receiver kept transmitting. |
 | `RC_OK` | Channel frames returned. |
-| `RX_GAP` | The CRSF stream paused for 250 ms–1 s, then resumed. An RX reset (typically a brownout) looks like this; RF loss does not, because the receiver keeps transmitting. |
+| `RX_GAP` | The CRSF stream paused for 150 ms–1 s, then resumed. An RX reset (typically a brownout) looks like this; RF loss does not, because the receiver keeps transmitting. |
 | `PWR_DIP` | Only with the optional rail tap below: the 5V rail fell below the threshold and recovered. Carries the lowest voltage and how long it stayed low. |
+| `PWR_GLITCH` | Only with the optional power-good input below: a hardware-latched assertion of the supply supervisor, counted even when the loop was busy. This is what catches a rub shorter than one ADC sample. |
+| `PWR_OK` | The power-good line came back high, with how long it had been low. |
 
 Lines look like `EVENT,<uptime ms>,<code>,<detail>`, for example
 `EVENT,184312,RX_SILENT,no CRSF bytes for 1000ms; last rssi -88 dBm lq 0 snr 1`.
@@ -111,8 +113,12 @@ ground, or its TX wire all remove the signal, and the ESP32 cannot distinguish t
   `RF_LINK_LOST` immediately before it.
 
 If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the moment it
-happens; the `BOOT` counter increments when it comes back. That is how an ESP32-side reset
-or brownout is told apart from a receiver-side dropout.
+happens; the `BOOT` counter increments when it comes back and now names the reset reason, so
+a brownout reset is distinct from a receiver-side dropout.
+
+A receiver that boots with no transmitter powered reports 0% LQ until its first packet;
+the firmware only reports `RF_LINK_LOST` after it has seen a real link, so cold boots do
+not fill the log with noise.
 
 ## Supply (VIN) monitor (optional, for supply troubleshooting)
 
@@ -160,8 +166,7 @@ What this cannot promise:
 
 - Sampling is roughly 1–2 kHz while the loop is free, so a 1 ms dip is recorded only if a
   sample lands inside it and WiFi/flash work is not blocking the loop. Guaranteed capture of
-  sub-millisecond events needs a hardware power-good supervisor wired to a GPIO interrupt,
-  which this firmware does not implement.
+  sub-millisecond events needs a hardware latch — see the next section.
 - The ADC measures against an internal ~1.1 V bandgap (11 dB attenuation gives roughly a
   0–3.1 V range), not against the 3V3 rail, so it keeps reading while the chip runs. Its
   accuracy is still poor by instrument standards — a few percent, non-linear near the ends
@@ -169,13 +174,46 @@ What this cannot promise:
 - The AMS1117 on most dev boards needs roughly 4.4 V in to hold 3.3 V out. VIN below that
   drags the whole board down with it, and the reading becomes less trustworthy right where
   it matters. Dips that deep usually end in a reset, which is what the `BOOT` counter shows.
-- If a dip is deep enough to reset the ESP32, no `PWR_DIP` is written — the board is
-  rebooting. The next `BOOT` entry increments and its detail shows the rail at start-up,
-  which is how that case shows up.
+- A dip deep enough to reset the ESP32 writes no `PWR_DIP` — the board is rebooting. The next
+  `BOOT` entry increments, names the reset reason and shows the rail at start-up.
 
-A receiver that boots with no transmitter powered reports 0% LQ until its first packet;
-the firmware only reports `RF_LINK_LOST` after it has seen a real link, so cold boots do
-not fill the log with noise.
+## Catching a rub that lasts a millisecond
+
+If the fault is a connector rubbing, the rail may be open for microseconds to a few
+milliseconds. No amount of ADC code can promise to see that: the sample has to land inside
+the gap, and WiFi or flash work can block the loop for far longer than the gap. What *can*
+catch it is a hardware threshold, because the ESP32's GPIO peripheral latches an edge even
+when the CPU is busy.
+
+Use one of these, powered from the rail you care about, with an **active-low** output:
+
+- **Supply supervisor** (simplest): TCM809/TCM810, MAX809, APX803, MCP131 and similar come
+  in 4.5–4.7 V thresholds. VCC to VIN, GND, output to the chosen GPIO with a 10k pull-up to
+  3V3 if it is open-drain. Supervisors also add their own reset delay (often 20–200 ms) to
+  the reported duration, so the *event* is exact but the time low is the chip's hold time.
+- **Comparator** (LM393 and a divider/trimmer): gives the true duration and an adjustable
+  threshold, at the cost of a couple more parts and some hysteresis tuning.
+
+Then set the pin near the top of the sketch:
+
+```cpp
+#define RANGELAB_PWRGOOD_PIN 35
+```
+
+GPIO 34/35/36/39 are input-only and have **no internal pull-up** — fit an external 10k to
+3V3 for an open-drain output. Don't reuse the ADC tap pin or one of the SAFE_PINS outputs.
+
+The ISR only counts edges, so it stays safe while flash is being written; the loop turns the
+count into `PWR_GLITCH` events. A burst of rubs inside one blocked loop pass still shows up
+as "N power-good assertion(s)" rather than being lost.
+
+Two more ways the same fault shows up without that input:
+
+- If the rub resets the receiver but not the ESP32, the CRSF stream stops for its boot time
+  and `RX_GAP` (now 150 ms–1 s) records it.
+- If it resets the ESP32, `BOOT` now names the reason: `brownout` is a supply reset, while
+  `power-on`, `software`, `panic` or `watchdog` point elsewhere. That is the difference
+  between "it restarted" and "it restarted because the 5V collapsed".
 
 ### How the link was lost
 

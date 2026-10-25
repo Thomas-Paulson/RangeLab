@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 12713 bytes
+// 12868 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -257,9 +257,10 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
       <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
-      <strong>RX_GAP</strong> — the CRSF stream paused for 250 ms–1 s: an RX reset, not RF loss.
-      <strong>PWR_DIP</strong> — the 5V rail dropped below 4.60 V (depth and duration recorded); needs the optional ADC tap.
-      <strong>BOOT</strong> — the ESP32 restarted; a rising number means it lost power too.
+      <strong>RX_GAP</strong> — the CRSF stream paused for 150 ms–1 s: an RX reset, not RF loss.
+      <strong>PWR_DIP</strong> — the 5V rail dropped below the threshold (depth and duration recorded); needs the optional ADC tap.
+      <strong>PWR_GLITCH</strong> — hardware-latched supply assertion, caught even mid-rub; needs the optional power-good input.
+      <strong>BOOT</strong> — the ESP32 restarted (its reason is recorded: brownout, watchdog, power-on…).
     </p>
   </section>
 
@@ -523,7 +524,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 13711 bytes
+// 13735 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -652,8 +653,8 @@ function buildChannelRows() {
   }
 }
 
-const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP']);
-const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK']);
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH']);
+const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK', 'PWR_OK']);
 // Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
 const RAIL_LOW_MV = 4600;
 
@@ -939,6 +940,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 37161;
+static constexpr size_t WEB_ASSETS_BYTES = 37340;
 
 #endif  // RANGELAB_WEB_ASSETS_H
