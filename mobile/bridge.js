@@ -8,6 +8,7 @@
 
 export const CHANNEL_COUNT = 16;
 export const MAX_EVENTS = 200;
+export const MAX_TRACE = 24;
 export const SAFE_PINS = [13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
 export const MODES = ['OFF', 'SERVO', 'PWM', 'DIGITAL', 'WINDOW', 'CURVE'];
 export const DEFAULT_CURVE = [1000, 1250, 1500, 1750, 2000];
@@ -38,6 +39,9 @@ export function createState() {
     events: [],
     eventDraft: null,
     eventsVersion: 0,
+    trace: [],
+    traceDraft: null,
+    traceVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
     lastLineAt: null,
@@ -162,6 +166,22 @@ export function applyLine(state, raw) {
     // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
     return { ...base, rail: { mv, minMv } };
+  }
+  // The ESP32 keeps the last ~2.4 s of link statistics; TRACE replays it between
+  // TRACE_BEGIN and TRACE_END so a loss can be read as a fade or a cliff.
+  if (upper.startsWith('TRACE_BEGIN')) {
+    return { ...base, traceDraft: [], traceVersion: base.traceVersion + 1 };
+  }
+  if (upper.startsWith('TRACE_END')) {
+    const final = base.traceDraft ?? base.trace;
+    return { ...base, trace: final.slice(-MAX_TRACE), traceDraft: null, traceVersion: base.traceVersion + 1 };
+  }
+  if (upper.startsWith('TRACE,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 10 || !base.traceDraft) return base;
+    const [at, rssi1, rssi2, lq, snr, ant, mode, txPwr, downLq, downSnr] = values;
+    const point = { at, rssi1, rssi2, lq, snr, ant, mode, txPwr, downLq, downSnr };
+    return { ...base, traceDraft: base.traceDraft.concat(point).slice(-MAX_TRACE), traceVersion: base.traceVersion + 1 };
   }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };

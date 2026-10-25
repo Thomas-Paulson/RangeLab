@@ -24,6 +24,7 @@ let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
 let renderedLineCount = -1;
 let renderedEventVersion = -1;
+let renderedTraceVersion = -1;
 let lastFrame = 0;
 let enableArmedAt = 0;
 let curveInputs = [];
@@ -71,6 +72,7 @@ function connect() {
     push('Bridge connected. Reading config and event log.');
     ws.send('GET');
     ws.send('EVENTS');
+    ws.send('TRACE');
   };
   ws.onmessage = (event) => {
     const { lines, rest } = splitLines(rxBuffer, String(event.data));
@@ -157,6 +159,25 @@ function renderEvents() {
     .join('');
 }
 
+const TRACE_HEADER = '<div class="tr head"><span>t</span><span>RSSI A/B</span><span>LQ</span><span>SNR</span><span>ANT</span><span>MODE</span><span>TX</span></div>';
+
+// Link statistics leading into the last drop, oldest first. A gentle RSSI slide
+// is range/obstruction; LQ collapsing while RSSI holds is interference or loss.
+function renderTrace() {
+  if (state.traceVersion === renderedTraceVersion) return;
+  renderedTraceVersion = state.traceVersion;
+  const host = el('trace');
+  if (!state.trace.length) {
+    host.innerHTML = '<div class="ev empty">No link samples yet.</div>';
+    return;
+  }
+  host.innerHTML = TRACE_HEADER + state.trace
+    .map((p) => `<div class="tr"><span>${formatUptime(p.at)}</span><span>${p.rssi1}/${p.rssi2}</span>`
+      + `<b class="${p.lq === 0 ? 'zero' : ''}">${p.lq}</b><span>${p.snr}</span>`
+      + `<span>${p.ant}</span><span>${p.mode}</span><span>${p.txPwr}</span></div>`)
+    .join('');
+}
+
 function render() {
   const now = Date.now();
   const signal = state.channelUpdatedAt !== null && now - state.channelUpdatedAt < 700;
@@ -201,6 +222,7 @@ function render() {
   }
 
   renderEvents();
+  renderTrace();
 
   if (state.lineCount !== renderedLineCount) {
     renderedLineCount = state.lineCount;
@@ -342,6 +364,7 @@ function wire() {
 
   el('read-config').addEventListener('click', () => send('GET'));
   el('load-events').addEventListener('click', () => send('EVENTS'));
+  el('load-trace').addEventListener('click', () => send('TRACE'));
   el('clear-events').addEventListener('click', () => {
     if (!state.controlsUnlocked) {
       push('Unlock controls before clearing the event log.');

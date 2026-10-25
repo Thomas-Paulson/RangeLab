@@ -65,6 +65,8 @@ Nothing here needs a router or a cellular signal. The ESP32 is the network.
 - Enable and disable GPIO outputs.
 - Read (and, once unlocked, clear) the link/receiver event log kept in the ESP32's flash,
   and, if the optional rail tap is wired, the live 5V rail voltage and its lowest reading.
+- Load the last ~2.4 s of link statistics (`TRACE`) to see how a link was lost: both antenna
+  RSSIs, LQ, SNR, antenna, RF mode, TX power and downlink quality.
 
 It deliberately does **not** do field-log download — a full dump is ~1.8 MB of ASCII, which
 is too much for the bridge and it would stall the RC loop for seconds. `LOG DUMP` is
@@ -160,6 +162,48 @@ A receiver that boots with no transmitter powered reports 0% LQ until its first 
 the firmware only reports `RF_LINK_LOST` after it has seen a real link, so cold boots do
 not fill the log with noise.
 
+### How the link was lost
+
+Every link-statistics frame carries more than RSSI/LQ/SNR: the second antenna's RSSI, the
+active antenna, the RF mode, the transmitter's power setting and the downlink (RX→TX)
+statistics. The firmware keeps the last ~2.4 s of those samples (one every 100 ms, in RAM)
+and, when uplink LQ reaches 0, writes a summary into the event log:
+
+```
+EVENT,184312,RF_LINK_LOST,lq 100>0 rssi -62>-95 min -96 snr 9>-3 dlq 100>0 ant 1 mode 2 tx 100mW trend -62,-64,-70,-88,-95
+```
+
+- `lq 100>0` — uplink LQ at the start of the window and at the loss.
+- `rssi -62>-95 min -96` — best-antenna RSSI (dBm) at start, at loss, and lowest seen.
+- `snr`, `dlq` — SNR and downlink LQ across the same window.
+- `ant`, `mode`, `tx` — active antenna, RF mode and transmitter power at the loss.
+- `trend` — up to six best-antenna RSSI samples across the window: the shape of the fade.
+
+`TRACE` (the page's **Load trace** button, or the command over USB) prints the raw points,
+one per 100 ms:
+
+```
+TRACE,<ms>,<rssi1>,<rssi2>,<lq>,<snr>,<antenna>,<rf mode>,<tx power>,<downlink LQ>,<downlink SNR>
+```
+
+`RF_LINK_OK` then reports how long the link was gone and the RSSI/LQ it came back at.
+
+The trace is RAM-only and scrolls continuously; only the summary is persisted. Read it like
+this:
+
+- **RSSI slides down before the drop** (`-62,-70,-88,-95`) — range, obstruction, antenna
+  orientation or a shielded antenna. Compare `rssi1`/`rssi2`: a large lasting gap suggests one
+  antenna is disconnected or damaged.
+- **LQ collapses while RSSI stays strong** — interference or packet loss rather than a weak
+  signal: co-channel noise, a bad antenna joint, or packets lost on the transmitter side.
+- **TX power or RF mode changes at the drop** — the transmitter changed power or rate, which
+  can present as a link loss.
+- **Downlink LQ falls first** — the return path is failing while control still holds.
+
+What it cannot do: everything here is reported by the receiver. It cannot identify an
+interferer, prove the transmitter's antenna or PA is healthy, and records nothing at all if
+the receiver stops talking (`RX_SILENT` has no statistics to show).
+
 ## Safety model
 
 - Outputs are still disabled on boot and after 500 ms without valid RC frames.
@@ -189,6 +233,8 @@ not fill the log with noise.
 - Direct rail measurement needs the optional ADC tap; without it a millisecond supply dip is
   invisible unless it interrupts the CRSF stream (`RX_GAP` / `RX_SILENT`). With it, dips
   shorter than one loop pass — WiFi bursts, flash writes, HTTP serving — can still be missed.
+- The link trace is the receiver's own view, kept in RAM for ~2.4 s. Only the summary survives
+  a reboot or a reconnect, and a receiver that stops transmitting leaves no trace at all.
 
 ## USB-only build
 

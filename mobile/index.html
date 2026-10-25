@@ -126,6 +126,17 @@
   .ev b.good { color: var(--good); }
   .ev em { color: #9fadc7; font-style: normal; overflow-wrap: anywhere; }
   .ev.empty { display: block; color: #58657d; }
+  .sub.tight { margin-top: 12px; }
+  .trace { margin-top: 8px; }
+  .trace .tr {
+    display: grid; grid-template-columns: 46px 62px 26px 34px 26px 30px 34px; gap: 6px;
+    align-items: baseline; padding: 2px 0; border-bottom: 1px solid #141b28;
+    font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9fadc7;
+  }
+  .trace .tr:last-child { border-bottom: 0; }
+  .trace .tr.head { color: #58657d; font-weight: 600; border-bottom-color: #253047; }
+  .trace .tr b { color: #9fadc7; font-weight: 600; }
+  .trace .tr b.zero { color: var(--bad); }
   footer { text-align: center; color: #58657d; font-size: 10px; padding: 6px 0 0; line-height: 1.6; }
   .hidden { display: none !important; }
 </style>
@@ -228,8 +239,11 @@
     <div id="events" class="events"></div>
     <div class="actions">
       <button class="grow" id="load-events" type="button">Load events</button>
+      <button type="button" id="load-trace">Load trace</button>
       <button type="button" id="clear-events">Clear log</button>
     </div>
+    <p class="sub tight">Link statistics before the last drop — a slide is range, a cliff is interference</p>
+    <div id="trace" class="events trace"></div>
     <p class="note">
       <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.

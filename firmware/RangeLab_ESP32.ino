@@ -23,7 +23,9 @@
   Commands: GET, SET,ch,min,max,mode,pin,outLow,outHigh[,curve x5], ENABLE, DISABLE, PING,
             LOG START|STOP|DUMP|CLEAR (field logging to internal flash, 10 Hz, persists across
             restarts; wraps when full and records an OVERFLOW marker),
-            EVENTS[,CLEAR] (short link/receiver trouble log, also in internal flash).
+            EVENTS[,CLEAR] (short link/receiver trouble log, also in internal flash),
+            TRACE (the last ~2.4 s of link statistics: both antennas, LQ, SNR, RF
+            mode and TX power, sampled every 100 ms).
   Modes: OFF, SERVO (microseconds), PWM (0..255), DIGITAL (threshold at midpoint),
          WINDOW (output high inside outLow..outHigh band), CURVE (5-point servo curve).
   Never connect motors/servos directly to GPIO if their current exceeds GPIO capability.
@@ -95,6 +97,15 @@ uint8_t frame[80]; size_t frameLen=0;
 uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
 String usbLine;
 bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
+// Rest of the CRSF link-statistics frame: second antenna, RF mode, TX power and
+// the downlink direction, all of which say more about a loss than RSSI alone.
+int16_t linkRssi2=0; uint8_t linkAntenna=0, linkMode=0, linkTxPower=0, linkDownLq=0; int8_t linkDownSnr=0;
+// Rolling pre-loss trace. One point per 100 ms, so 24 points cover ~2.4 s.
+struct LinkPoint { uint32_t ms; int16_t rssi1, rssi2; int8_t snr, downSnr; uint8_t lq, ant, mode, txPwr, downLq; };
+static constexpr size_t LINK_POINTS = 24;
+static constexpr uint32_t LINK_POINT_MS = 100;
+LinkPoint linkPoints[LINK_POINTS];
+size_t linkHead=0, linkCount=0; uint32_t lastLinkPointMs=0; uint32_t rfLostAtMs=0;
 // Event detection state. rxSilent stays true until the receiver has sent bytes at
 // least once, so a board that boots with no receiver attached logs BOOT only.
 uint32_t lastCrsfByteMs=0; uint32_t lastLinkStatMs=0; uint32_t lastEventScanMs=0;
@@ -197,7 +208,10 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //                 like from the ESP32.
 //   RX_ACTIVE     the receiver is transmitting again.
 //   RF_LINK_LOST  the receiver is alive and talking, but reports 0% link quality.
-//   RF_LINK_OK    link quality is back.
+//                 Its detail is a summary of the pre-loss trace: LQ, both-antenna
+//                 RSSI, SNR, downlink LQ, RF mode, TX power and an RSSI trend, so
+//                 a fade and a cliff can be told apart. TRACE prints the raw points.
+//   RF_LINK_OK    link quality is back, with how long it was gone.
 //   RC_LOST       channel frames stopped while the receiver keeps transmitting.
 //   RC_OK         channel frames are back.
 //   RX_GAP        the CRSF stream paused for 250 ms-1 s, then resumed: short
@@ -303,6 +317,73 @@ void flushGapEvent() {
   pendingGapMs = 0;
   eventAppend("RX_GAP", detail);
 }
+// ---- link trace: what the receiver itself reported before a loss ----------
+// ELRS sends both antenna RSSIs, the active antenna, RF mode, transmitter power
+// and the downlink stats. Recording them lets you tell a fade (range, obstruction,
+// antenna) from a cliff (interference or packet loss with signal still present).
+// 0 is what some receivers report when they have no packet for that antenna, not
+// a real -0 dBm reading; ignore it rather than letting it look like a strong link.
+int bestRssi(const LinkPoint &p) {
+  if(p.rssi1 == 0 && p.rssi2 == 0) return 0;
+  if(p.rssi1 == 0) return p.rssi2;
+  if(p.rssi2 == 0) return p.rssi1;
+  return p.rssi1 > p.rssi2 ? p.rssi1 : p.rssi2;
+}
+const LinkPoint* linkPointAt(size_t i) {
+  if(i >= linkCount) return nullptr;
+  return &linkPoints[(linkHead + LINK_POINTS - linkCount + i) % LINK_POINTS];
+}
+void recordLinkPoint() {
+  const uint32_t now = millis();
+  if(linkCount && now - lastLinkPointMs < LINK_POINT_MS) return;
+  lastLinkPointMs = now;
+  LinkPoint &p = linkPoints[linkHead];
+  p.ms = now;
+  p.rssi1 = linkRssi; p.rssi2 = linkRssi2;
+  p.snr = linkSnr; p.downSnr = linkDownSnr;
+  p.lq = (uint8_t)linkLq; p.ant = linkAntenna; p.mode = linkMode; p.txPwr = linkTxPower; p.downLq = linkDownLq;
+  linkHead = (linkHead + 1) % LINK_POINTS;
+  if(linkCount < LINK_POINTS) linkCount++;
+}
+String lossSummary() {
+  const LinkPoint *first = linkPointAt(0);
+  const LinkPoint *last = linkCount ? linkPointAt(linkCount - 1) : nullptr;
+  int minRssi = 0; bool haveMin = false;
+  for(size_t i = 0; i < linkCount; i++) {
+    const int r = bestRssi(*linkPointAt(i));
+    if(!haveMin || r < minRssi) { minRssi = r; haveMin = true; }
+  }
+  char head[160];
+  snprintf(head, sizeof(head),
+           "lq %u>%u rssi %d>%d min %d snr %d>%d dlq %u>%u ant %u mode %u tx %umW",
+           (unsigned)(first ? first->lq : 0), (unsigned)(last ? last->lq : 0),
+           first ? bestRssi(*first) : 0, last ? bestRssi(*last) : 0, haveMin ? minRssi : 0,
+           (int)(first ? first->snr : 0), (int)(last ? last->snr : 0),
+           (unsigned)(first ? first->downLq : 0), (unsigned)(last ? last->downLq : 0),
+           (unsigned)(last ? last->ant : 0), (unsigned)(last ? last->mode : 0), (unsigned)(last ? last->txPwr : 0));
+  String out(head);
+  if(linkCount) {
+    out += " trend";
+    const size_t step = linkCount > 6 ? (linkCount + 5) / 6 : 1;
+    size_t printed = 0;
+    for(size_t i = 0; i < linkCount && printed < 6; i += step) {
+      out += printed == 0 ? " " : ",";
+      out += bestRssi(*linkPointAt(i));
+      printed++;
+    }
+  }
+  return out;
+}
+void dumpLinkTrace() {
+  Console.println("TRACE_BEGIN");
+  for(size_t i = 0; i < linkCount; i++) {
+    const LinkPoint *p = linkPointAt(i);
+    Console.printf("TRACE,%lu,%d,%d,%u,%d,%u,%u,%u,%u,%d\n",
+                   (unsigned long)p->ms, (int)p->rssi1, (int)p->rssi2, (unsigned)p->lq, (int)p->snr,
+                   (unsigned)p->ant, (unsigned)p->mode, (unsigned)p->txPwr, (unsigned)p->downLq, (int)p->downSnr);
+  }
+  Console.println("TRACE_END");
+}
 void logBootEvent() {
   prefs.begin("rangelab", false);
   bootCount = prefs.getUShort("boots", 0) + 1;
@@ -345,11 +426,13 @@ void scanEvents() {
   if(rfLostNow != rfLinkLost) {
     rfLinkLost = rfLostNow;
     if(rfLostNow) {
-      char detail[96];
-      snprintf(detail, sizeof(detail), "link quality 0%% rssi %d dBm snr %d", linkRssi, (int)linkSnr);
-      eventAppend("RF_LINK_LOST", detail);
+      rfLostAtMs = millis();
+      eventAppend("RF_LINK_LOST", lossSummary().c_str());
     } else {
-      eventAppend("RF_LINK_OK", "receiver reports link quality again");
+      char detail[120];
+      snprintf(detail, sizeof(detail), "link back after %lums; rssi %d dBm lq %u%s",
+               (unsigned long)(millis() - rfLostAtMs), (int)linkRssi, (unsigned)linkLq, railNote().c_str());
+      eventAppend("RF_LINK_OK", detail);
     }
   }
 
@@ -470,6 +553,7 @@ void handleCommand(String line) {
     }
   }
   if(line.equalsIgnoreCase("EVENTS")) { dumpEventLog(); return; }
+  if(line.equalsIgnoreCase("TRACE")) { dumpLinkTrace(); return; }
   if(line.equalsIgnoreCase("EVENTS,CLEAR")) {
     if(!LittleFS.begin(true)){Console.println("ERROR,event flash unavailable");return;}
     LittleFS.remove(EVENT_PATH);
@@ -565,7 +649,15 @@ void startWifiBridge() {
 void parseCrsfFrame(const uint8_t *f,size_t n) {
   if(n<4)return; uint8_t type=f[2]; const uint8_t *p=f+3; size_t plen=n-4;
   if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.print("CH");for(int i=0;i<16;i++){Console.print(',');Console.print(channels[i]);}Console.println();}}
-  else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(int16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];lastLinkStatMs=millis();Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
+  else if(type==CRSF_LINK_STATISTICS&&plen>=10){
+    linkRssi=(int16_t)-(int)p[0]; linkRssi2=(int16_t)-(int)p[1];
+    linkLq=p[2]; linkSnr=(int8_t)p[3];
+    linkAntenna=p[4]; linkMode=p[5]; linkTxPower=p[6];
+    linkDownLq=p[8]; linkDownSnr=(int8_t)p[9];
+    lastLinkStatMs=millis();
+    recordLinkPoint();
+    Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
+  }
 }
 void pollCrsf(){while(CRSF.available()){noteCrsfByte(millis());uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
 void setup(){Serial.begin(USB_BAUD);

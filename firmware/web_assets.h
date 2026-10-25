@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 11929 bytes
+// 12713 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -135,6 +135,17 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
   .ev b.good { color: var(--good); }
   .ev em { color: #9fadc7; font-style: normal; overflow-wrap: anywhere; }
   .ev.empty { display: block; color: #58657d; }
+  .sub.tight { margin-top: 12px; }
+  .trace { margin-top: 8px; }
+  .trace .tr {
+    display: grid; grid-template-columns: 46px 62px 26px 34px 26px 30px 34px; gap: 6px;
+    align-items: baseline; padding: 2px 0; border-bottom: 1px solid #141b28;
+    font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9fadc7;
+  }
+  .trace .tr:last-child { border-bottom: 0; }
+  .trace .tr.head { color: #58657d; font-weight: 600; border-bottom-color: #253047; }
+  .trace .tr b { color: #9fadc7; font-weight: 600; }
+  .trace .tr b.zero { color: var(--bad); }
   footer { text-align: center; color: #58657d; font-size: 10px; padding: 6px 0 0; line-height: 1.6; }
   .hidden { display: none !important; }
 </style>
@@ -237,8 +248,11 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
     <div id="events" class="events"></div>
     <div class="actions">
       <button class="grow" id="load-events" type="button">Load events</button>
+      <button type="button" id="load-trace">Load trace</button>
       <button type="button" id="clear-events">Clear log</button>
     </div>
+    <p class="sub tight">Link statistics before the last drop — a slide is range, a cliff is interference</p>
+    <div id="trace" class="events trace"></div>
     <p class="note">
       <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
@@ -265,7 +279,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 9707 bytes
+// 10737 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -276,6 +290,7 @@ static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge
 
 export const CHANNEL_COUNT = 16;
 export const MAX_EVENTS = 200;
+export const MAX_TRACE = 24;
 export const SAFE_PINS = [13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
 export const MODES = ['OFF', 'SERVO', 'PWM', 'DIGITAL', 'WINDOW', 'CURVE'];
 export const DEFAULT_CURVE = [1000, 1250, 1500, 1750, 2000];
@@ -306,6 +321,9 @@ export function createState() {
     events: [],
     eventDraft: null,
     eventsVersion: 0,
+    trace: [],
+    traceDraft: null,
+    traceVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
     lastLineAt: null,
@@ -431,6 +449,22 @@ export function applyLine(state, raw) {
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
     return { ...base, rail: { mv, minMv } };
   }
+  // The ESP32 keeps the last ~2.4 s of link statistics; TRACE replays it between
+  // TRACE_BEGIN and TRACE_END so a loss can be read as a fade or a cliff.
+  if (upper.startsWith('TRACE_BEGIN')) {
+    return { ...base, traceDraft: [], traceVersion: base.traceVersion + 1 };
+  }
+  if (upper.startsWith('TRACE_END')) {
+    const final = base.traceDraft ?? base.trace;
+    return { ...base, trace: final.slice(-MAX_TRACE), traceDraft: null, traceVersion: base.traceVersion + 1 };
+  }
+  if (upper.startsWith('TRACE,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 10 || !base.traceDraft) return base;
+    const [at, rssi1, rssi2, lq, snr, ant, mode, txPwr, downLq, downSnr] = values;
+    const point = { at, rssi1, rssi2, lq, snr, ant, mode, txPwr, downLq, downSnr };
+    return { ...base, traceDraft: base.traceDraft.concat(point).slice(-MAX_TRACE), traceVersion: base.traceVersion + 1 };
+  }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('READY,')) return { ...base, device: line.split(',').slice(1).join(' ') };
@@ -489,7 +523,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 12637 bytes
+// 13711 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -516,6 +550,7 @@ let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
 let renderedLineCount = -1;
 let renderedEventVersion = -1;
+let renderedTraceVersion = -1;
 let lastFrame = 0;
 let enableArmedAt = 0;
 let curveInputs = [];
@@ -563,6 +598,7 @@ function connect() {
     push('Bridge connected. Reading config and event log.');
     ws.send('GET');
     ws.send('EVENTS');
+    ws.send('TRACE');
   };
   ws.onmessage = (event) => {
     const { lines, rest } = splitLines(rxBuffer, String(event.data));
@@ -649,6 +685,25 @@ function renderEvents() {
     .join('');
 }
 
+const TRACE_HEADER = '<div class="tr head"><span>t</span><span>RSSI A/B</span><span>LQ</span><span>SNR</span><span>ANT</span><span>MODE</span><span>TX</span></div>';
+
+// Link statistics leading into the last drop, oldest first. A gentle RSSI slide
+// is range/obstruction; LQ collapsing while RSSI holds is interference or loss.
+function renderTrace() {
+  if (state.traceVersion === renderedTraceVersion) return;
+  renderedTraceVersion = state.traceVersion;
+  const host = el('trace');
+  if (!state.trace.length) {
+    host.innerHTML = '<div class="ev empty">No link samples yet.</div>';
+    return;
+  }
+  host.innerHTML = TRACE_HEADER + state.trace
+    .map((p) => `<div class="tr"><span>${formatUptime(p.at)}</span><span>${p.rssi1}/${p.rssi2}</span>`
+      + `<b class="${p.lq === 0 ? 'zero' : ''}">${p.lq}</b><span>${p.snr}</span>`
+      + `<span>${p.ant}</span><span>${p.mode}</span><span>${p.txPwr}</span></div>`)
+    .join('');
+}
+
 function render() {
   const now = Date.now();
   const signal = state.channelUpdatedAt !== null && now - state.channelUpdatedAt < 700;
@@ -693,6 +748,7 @@ function render() {
   }
 
   renderEvents();
+  renderTrace();
 
   if (state.lineCount !== renderedLineCount) {
     renderedLineCount = state.lineCount;
@@ -834,6 +890,7 @@ function wire() {
 
   el('read-config').addEventListener('click', () => send('GET'));
   el('load-events').addEventListener('click', () => send('EVENTS'));
+  el('load-trace').addEventListener('click', () => send('TRACE'));
   el('clear-events').addEventListener('click', () => {
     if (!state.controlsUnlocked) {
       push('Unlock controls before clearing the event log.');
@@ -882,6 +939,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 34273;
+static constexpr size_t WEB_ASSETS_BYTES = 37161;
 
 #endif  // RANGELAB_WEB_ASSETS_H

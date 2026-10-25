@@ -111,6 +111,26 @@ test('mobile: an empty dump keeps live events, and clearing empties the list', (
   assert.equal(state.events[0].detail, '');
 });
 
+test('mobile: replaces the link trace when the device replays one', () => {
+  let state = createState();
+  state = applyLine(state, 'TRACE_BEGIN');
+  state = applyLine(state, 'TRACE,1200,-62,-64,100,9,1,2,100,88,-3');
+  state = applyLine(state, 'TRACE,1300,-95,-96,0,-2,1,2,100,0,-12');
+  state = applyLine(state, 'TRACE_END');
+  assert.equal(state.traceDraft, null);
+  assert.deepEqual(state.trace, [
+    { at: 1200, rssi1: -62, rssi2: -64, lq: 100, snr: 9, ant: 1, mode: 2, txPwr: 100, downLq: 88, downSnr: -3 },
+    { at: 1300, rssi1: -95, rssi2: -96, lq: 0, snr: -2, ant: 1, mode: 2, txPwr: 100, downLq: 0, downSnr: -12 },
+  ]);
+
+  // Points outside a dump are ignored, and a new dump replaces the old trace.
+  state = applyLine(state, 'TRACE,1400,-60,-61,100,8,1,2,100,90,2');
+  assert.equal(state.trace.length, 2);
+  state = applyLine(state, 'TRACE_BEGIN');
+  state = applyLine(state, 'TRACE_END');
+  assert.deepEqual(state.trace, []);
+});
+
 test('mobile: shows the optional 5V rail reading and ignores nonsense', () => {
   let state = applyLine(createState(), 'RAIL,4980,4712');
   assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
