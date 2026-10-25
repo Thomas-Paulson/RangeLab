@@ -21,7 +21,11 @@ jobs:
       - run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-      - run: arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build firmware/RangeLab_ESP32.ino --warnings default
+      - run: |
+          # arduino-cli requires the sketch folder to match the .ino name
+          mkdir -p sketch/RangeLab_ESP32
+          cp firmware/RangeLab_ESP32.ino sketch/RangeLab_ESP32/
+          arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build sketch/RangeLab_ESP32 --warnings default
       - uses: actions/upload-artifact@v4
         with:
           name: RangeLab-firmware-esp32
@@ -62,16 +66,30 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - run: npm install
       - run: npm test
-      - uses: tauri-apps/tauri-action@v1
+      # macOS signing and notarization. Only exported when the secrets exist,
+      # because empty env vars make Tauri attempt a signing/notarization that fails.
+      - name: Configure Apple signing (optional)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS signing and notarization. Leave these secrets unset to build unsigned.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            { echo 'APPLE_CERTIFICATE<<CERT_EOF'; echo "$APPLE_CERTIFICATE"; echo 'CERT_EOF'; } >> "$GITHUB_ENV"
+            { echo 'APPLE_CERTIFICATE_PASSWORD<<PWD_EOF'; echo "$APPLE_CERTIFICATE_PASSWORD"; echo 'PWD_EOF'; } >> "$GITHUB_ENV"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_PASSWORD=$APPLE_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          fi
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
       - uses: actions/upload-artifact@v4
