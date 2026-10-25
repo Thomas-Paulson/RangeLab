@@ -108,6 +108,12 @@ static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
 // Rail monitor and short-gap detector (the rail macros live at the top).
 static constexpr uint32_t RAIL_REPORT_MS = 1000;   // live RAIL line cadence
 static constexpr uint32_t RX_GAP_MS = 150;         // CRSF stream pause worth recording
+// Stream stops. A receiver that loses power and reboots comes back cold: no
+// packets, so its first link statistics read 0 dBm on both antennas. That is what
+// separates "the receiver restarted" from "the wire opened while it kept running".
+static constexpr uint32_t RX_RESUME_GAP_MS = 40;   // pause beyond the frame cadence (20 ms at 50 Hz)
+static constexpr uint32_t RX_RESUME_SLACK_MS = 30;// allow for the loop stall just measured
+static constexpr uint32_t RX_RESTART_WAIT_MS = 1500; // how long to wait for stats after a resume
 // Receiver UART health. A CRSF frame carries a CRC over its type, payload and
 // length, and the wire from the receiver to the ESP32 is not radio: bytes cannot
 // be corrupted in flight by interference. A frame that fails its CRC was damaged
@@ -158,7 +164,11 @@ uint16_t bootCount=0;
 // 5V rail monitor and short-gap detector.
 int railMv=-1, railMinMv=-1, railDipMinMv=0;
 bool railLow=false; uint32_t railLowSinceMs=0, lastRailReportMs=0;
-uint32_t pendingGapMs=0; uint32_t lastLoopMs=0, lastIterationMs=0;
+uint32_t lastLoopMs=0, lastIterationMs=0;
+// A stream pause, waiting to be classified once the receiver reports again.
+uint32_t resumeGapMs=0, resumeAtMs=0, resumeStatsAtMs=0;
+bool resumePending=false, resumeGotStats=false, resumeCold=false;
+uint16_t resumeLq=0; int16_t resumeRssi1=0, resumeRssi2=0; uint8_t resumeAnt=0, resumeMode=0;
 // Receiver UART health counters. wireCrcErrors are frames whose CRC did not
 // match; wireJunkBytes are bytes that could not start or continue a frame (the
 // stream lost sync). wireStallErrors are errors seen on a pass that followed a
@@ -259,7 +269,14 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //   RX_SILENT     no CRSF bytes at all: the receiver stopped transmitting. This
 //                 is what an unpowered receiver (or an open TX/ground wire) looks
 //                 like from the ESP32.
-//   RX_ACTIVE     the receiver is transmitting again.
+//   RX_ACTIVE     the receiver is transmitting again after a silence too long to
+//                 be a pause, and it did not come back cold (so it never rebooted).
+//   RX_RESTART    the stream stopped and the receiver came back cold: its first
+//                 link statistics reported 0 dBm on both antennas, which is what a
+//                 receiver that lost power and booted looks like. This is the event
+//                 for a supply drop too short to see on the ADC but long enough to
+//                 reset the receiver. The gap, the cold frame, the UART damage
+//                 around it and the rail at that moment are all in the detail.
 //   RF_LINK_LOST  the receiver is alive and talking, but reports 0% link quality.
 //                 Its detail is a summary of the pre-loss trace: LQ, both-antenna
 //                 RSSI, SNR, downlink LQ, RF mode, TX power and an RSSI trend, so
@@ -267,9 +284,11 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //   RF_LINK_OK    link quality is back, with how long it was gone.
 //   RC_LOST       channel frames stopped while the receiver keeps transmitting.
 //   RC_OK         channel frames are back.
-//   RX_GAP        the CRSF stream paused for 150 ms-1 s, then resumed: short
-//                 enough that RX_SILENT does not fire, but an RX reset (usually a
-//                 brownout) looks exactly like this.
+//   RX_GAP        the stream paused for 150 ms-1 s and the receiver kept its
+//                 state (its stats came back with a real LQ and RSSI), so it did
+//                 not reboot: the wire, plug or ground opened while it kept
+//                 running. A pause with UART damage around it is the wire; one
+//                 without is a receiver that stopped talking for another reason.
 //   PWR_DIP       only when RANGELAB_RAIL_ADC is wired: the 5V rail fell below
 //                 RANGELAB_RAIL_LOW_MV and recovered. Carries the lowest measured voltage
 //                 and how long it stayed low, so a supply problem is provable
@@ -302,7 +321,7 @@ void compactEventLog() {
   out.close();
 }
 void eventAppend(const char* code, const char* detail) {
-  char line[192];
+  char line[224];
   if(detail && *detail) snprintf(line, sizeof(line), "EVENT,%lu,%s,%s", (unsigned long)millis(), code, detail);
   else snprintf(line, sizeof(line), "EVENT,%lu,%s", (unsigned long)millis(), code);
   Console.println(line);              // live view over USB and to every connected phone
@@ -373,28 +392,59 @@ void pollRail() {
   }
 #endif
 }
+// Starts a pause record. The first byte after the gap decides the timing; what
+// the receiver reports next decides whether it restarted or the wire opened.
+void beginResume(const uint32_t gap, const uint32_t now) {
+  resumeGapMs = gap; resumeAtMs = now;
+  resumePending = true; resumeGotStats = false; resumeCold = false;
+  resumeLq = 0; resumeRssi1 = 0; resumeRssi2 = 0; resumeAnt = 0; resumeMode = 0;
+  // The stream restarted, so it will resume mid-frame. Whatever arrives before
+  // the next CRC-valid frame says nothing about the cable, and the damage from
+  // before the pause is already counted in the open burst.
+  wireSynced = false;
+  // The receiver's state is unknown until it reports again: a cold restart reads
+  // 0% LQ, which must not be mistaken for a link that was already failing.
+  sawLinkQuality = false; rfLinkLost = false; rcLost = false; lastLinkStatMs = 0;
+}
 // Records one byte arrival. Called for every CRSF byte; a pause longer than the
-// previous loop pass plus 100 ms is a real stream stop, while shorter ones are
+// previous loop pass (plus slack) is a real stream stop, while shorter ones are
 // loop stalls (HTTP serving, flash writes, WiFi bursts) and must not be logged.
 void noteCrsfByte(const uint32_t now) {
   const uint32_t gap = now - lastCrsfByteMs;
-  if(rxHeard && gap >= RX_GAP_MS && gap <= RX_SILENT_MS && gap > lastIterationMs + 100) {
-    pendingGapMs = gap;
-    // The stream restarted, so it will resume mid-frame. Whatever arrives before
-    // the next CRC-valid frame says nothing about the cable, and the damage from
-    // before the pause is already counted in the open burst.
-    wireSynced = false;
-  }
+  if(rxHeard && gap >= RX_RESUME_GAP_MS && gap > lastIterationMs + RX_RESUME_SLACK_MS) beginResume(gap, now);
   lastCrsfByteMs = now;
   rxHeard = true;
 }
-void flushGapEvent() {
-  if(!pendingGapMs) return;
-  char detail[160];
-  snprintf(detail, sizeof(detail), "CRSF stream paused for %lums%s%s",
-           (unsigned long)pendingGapMs, wireNote().c_str(), railNote().c_str());
-  pendingGapMs = 0;
-  eventAppend("RX_GAP", detail);
+// Classifies a pause once the receiver has had a chance to report. Nothing to do
+// while it is still pending, so this is cheap in the loop.
+void processResume() {
+  if(!resumePending) return;
+  const uint32_t now = millis();
+  if(!resumeGotStats && (uint32_t)(now - resumeAtMs) < RX_RESTART_WAIT_MS) return;
+  resumePending = false;
+  char detail[200];
+  if(resumeGotStats && resumeCold) {
+    snprintf(detail, sizeof(detail),
+             "receiver restarted: %lums of silence, stats %lums later lq %u rssi %d/%d ant %u mode %u%s%s",
+             (unsigned long)resumeGapMs, (unsigned long)(resumeStatsAtMs - resumeAtMs),
+             (unsigned)resumeLq, (int)resumeRssi1, (int)resumeRssi2,
+             (unsigned)resumeAnt, (unsigned)resumeMode, wireNote().c_str(), railNote().c_str());
+    eventAppend("RX_RESTART", detail);
+  } else if(resumeGapMs > RX_SILENT_MS) {
+    // Long silence that did not come back cold: the receiver was talking again
+    // before it had to report statistics.
+    eventAppend("RX_ACTIVE", "receiver is transmitting again");
+  } else if(resumeGapMs >= RX_GAP_MS) {
+    char head[120];
+    if(resumeGotStats)
+      snprintf(head, sizeof(head), "CRSF stream paused for %lums; receiver kept its state (lq %u ant %u mode %u)",
+               (unsigned long)resumeGapMs, (unsigned)resumeLq, (unsigned)resumeAnt, (unsigned)resumeMode);
+    else
+      snprintf(head, sizeof(head), "CRSF stream paused for %lums; no link statistics afterwards",
+               (unsigned long)resumeGapMs);
+    snprintf(detail, sizeof(detail), "%s%s%s", head, wireNote().c_str(), railNote().c_str());
+    eventAppend("RX_GAP", detail);
+  }
 }
 // ---- receiver UART health: what the cable looks like -------------------------
 // Called for every byte that does not belong to a CRC-valid frame. A stalled
@@ -426,6 +476,10 @@ void pollWire() {
              wireStallErrors ? "; loop stalls may have dropped bytes too" : "",
              railNote().c_str());
     eventAppend("WIRE_NOISE", detail);
+    // The counts belonged to that burst; zero them so a later pause detail does
+    // not claim damage that is minutes old.
+    wireBurstCrc = 0;
+    wireBurstJunk = 0;
   }
   if(now - lastWireReportMs >= WIRE_REPORT_MS) {
     lastWireReportMs = now;
@@ -576,7 +630,8 @@ void scanEvents() {
                wireNote().c_str(), railNote().c_str());
       eventAppend("RX_SILENT", detail);
     } else {
-      eventAppend("RX_ACTIVE", "receiver is transmitting again");
+      // The resume is classified by processResume(): a receiver that comes back
+      // cold restarted, which is a different fault from a pause on the wire.
       lastLinkStatMs = 0;  // wait for fresh statistics before judging link quality
     }
     rcLost = false;
@@ -823,6 +878,15 @@ void parseCrsfFrame(const uint8_t *f,size_t n) {
     linkAntenna=p[4]; linkMode=p[5]; linkTxPower=p[6];
     linkDownLq=p[8]; linkDownSnr=(int8_t)p[9];
     lastLinkStatMs=millis();
+    // The first statistics frame after a pause are the evidence: a receiver that
+    // rebooted has no packets yet and reports 0 dBm on both antennas, while one
+    // that kept running reports the link it still has.
+    if(resumePending && !resumeGotStats){
+      resumeGotStats=true; resumeStatsAtMs=lastLinkStatMs;
+      resumeLq=linkLq; resumeRssi1=linkRssi; resumeRssi2=linkRssi2;
+      resumeAnt=linkAntenna; resumeMode=linkMode;
+      resumeCold=(linkRssi==0 && linkRssi2==0);
+    }
     recordLinkPoint();
     Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
   }
@@ -869,7 +933,7 @@ void setup(){Serial.begin(USB_BAUD);
   startWifiBridge();
 #endif
   Console.println("READY,RangeLab-ESP32,1");Console.println("STATUS,OUTPUTS_DISABLED_ON_BOOT");}
-void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollPwrGood();pollCrsf();pollWire();flushGapEvent();
+void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollPwrGood();pollCrsf();pollWire();processResume();
   while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
   bool failsafe=millis()-lastRcMs>RC_TIMEOUT_MS;if(failsafe&&!wasFailsafe){for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.println("STATUS,RC_FAILSAFE_OUTPUTS_NEUTRAL");}wasFailsafe=failsafe;
   if(logArmed&&millis()-lastLogMs>=LOG_PERIOD_MS){lastLogMs=millis();logSample();}

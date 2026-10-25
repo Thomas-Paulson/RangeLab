@@ -71,9 +71,9 @@ ESP32 plugged into an iPhone can never be read by an app.
 
 Outputs and mapping writes stay locked until you press **Unlock controls**, and `DISABLE`
 is always accepted. The page also shows the link/receiver **event log** the ESP32 keeps in
-flash (`RX_SILENT` for a receiver that stopped transmitting, `RX_GAP` for a short
-stream pause such as an RX brownout, `RF_LINK_LOST` for a lost RF link, `BOOT` for an ESP32
-restart), and can clear it once unlocked. Add a 10k/10k divider from the 5V/VIN feed
+flash (`RX_SILENT` for a receiver that stopped transmitting, `RX_GAP` for a short stream
+pause that it kept running through, `RX_RESTART` when it came back cold, `RF_LINK_LOST` for
+a lost RF link, `BOOT` for an ESP32 restart), and can clear it once unlocked. Add a 10k/10k divider from the 5V/VIN feed
 to GPIO34 and set `RANGELAB_RAIL_ADC` to 34 to record actual **supply dips** (`PWR_DIP`) and
 show the live VIN voltage on the page. A supply supervisor or comparator on a GPIO
 (`RANGELAB_PWRGOOD_PIN`) latches dips too short to sample, and `BOOT` records the last reset
@@ -83,7 +83,10 @@ The page also shows **RX UART** health, which is how a bad cable is told apart f
 supply: CRSF frames are CRC-checked, and radio interference cannot damage the bytes on the
 wire, so damaged frames mean the plug, cable or ground between receiver and ESP32
 (`WIRE_NOISE` events, plus a live `WIRE,<bad>,<sync>,<ignored>` line over USB). Wiggle a
-joint and watch the counters climb. Field-log download stays on USB. Full setup, safety
+joint and watch the counters climb. A stream pause is also classified: if the receiver comes
+back cold (0 dBm on both antennas) it rebooted and the log says `RX_RESTART`, which is how a
+supply drop too fast to catch on the rail still gets named; if it comes back with its link
+intact it was the wire, and the log says `RX_GAP`. Field-log download stays on USB. Full setup, safety
 model and limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.

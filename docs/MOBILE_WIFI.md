@@ -86,12 +86,13 @@ phone alone. The page loads the log when it connects; **Load events** re-reads i
 | --- | --- |
 | `BOOT` | ESP32 started, numbered. A count that keeps climbing means the board itself is resetting (brownout, unstable supply, or a crash). |
 | `RX_SILENT` | No CRSF bytes at all for 1 s: the receiver stopped transmitting. |
-| `RX_ACTIVE` | Receiver bytes resumed. |
+| `RX_ACTIVE` | Receiver bytes resumed after a long silence, and it did not come back cold — so it never rebooted. |
+| `RX_RESTART` | The stream stopped and the receiver came back cold: its first link statistics report 0 dBm on both antennas, which is what a receiver that just booted looks like. This is the event for a supply drop too short to catch on the ADC but long enough to reset the receiver. The pause length, the cold frame, the UART damage around it and the rail are in the detail. |
 | `RF_LINK_LOST` | The receiver is still transmitting but its link statistics report 0% LQ. |
 | `RF_LINK_OK` | Link quality is back. |
 | `RC_LOST` | Channel frames stopped while the receiver kept transmitting. |
 | `RC_OK` | Channel frames returned. |
-| `RX_GAP` | The CRSF stream paused for 150 ms–1 s, then resumed. An RX reset (typically a brownout) looks like this; RF loss does not, because the receiver keeps transmitting. |
+| `RX_GAP` | The CRSF stream paused for 150 ms–1 s and the receiver kept its state (stats came back with a real LQ and RSSI), so it did not reboot: the wire, plug or ground opened while it kept running. RF loss does not look like this, because the receiver keeps transmitting. |
 | `PWR_DIP` | Only with the optional rail tap below: the 5V rail fell below the threshold and recovered. Carries the lowest voltage and how long it stayed low. |
 | `PWR_GLITCH` | Only with the optional power-good input below: a hardware-latched assertion of the supply supervisor, counted even when the loop was busy. This is what catches a rub shorter than one ADC sample. |
 | `PWR_OK` | The power-good line came back high, with how long it had been low. |
@@ -119,10 +120,10 @@ A third case is now separable inside that second one: a **scratchy connection**.
 frames arriving on GPIO16 are CRC-checked, and nothing in the air can corrupt them — the
 radio decodes and re-frames before the UART, so the wire carries clean digital bytes or
 nothing. Damaged frames therefore mean the wire itself: a plug half out, a crimp that only
-makes contact at some angles, a ground that is shared through a loose joint. `RX_SILENT` and
-`RX_GAP` details now carry how many UART errors came with the pause (`4 UART error(s)
-around it`), which is the difference between a wire opening and a receiver that simply ran
-out of power.
+makes contact at some angles, a ground that is shared through a loose joint. `RX_SILENT`,
+`RX_GAP` and `RX_RESTART` details carry how many UART errors came with the pause (`4 UART
+error(s) around it`), which separates a wire opening from a receiver that simply ran out of
+power.
 
 If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the moment it
 happens; the `BOOT` counter increments when it comes back and now names the reset reason, so
@@ -222,7 +223,8 @@ as "N power-good assertion(s)" rather than being lost.
 Two more ways the same fault shows up without that input:
 
 - If the rub resets the receiver but not the ESP32, the CRSF stream stops for its boot time
-  and `RX_GAP` (now 150 ms–1 s) records it.
+  and the pause is recorded — as `RX_RESTART` when the receiver comes back cold, `RX_GAP`
+  when it never lost power (see the UART section above).
 - If it resets the ESP32, `BOOT` now names the reason: `brownout` is a supply reset, while
   `power-on`, `software`, `panic` or `watchdog` point elsewhere. That is the difference
   between "it restarted" and "it restarted because the 5V collapsed".
@@ -310,9 +312,48 @@ Reading the result:
 
 - **Errors climb with the rail steady** — the supply is fine, the signal or ground path is not.
 - **Errors and `RX_SILENT` together** — the connection is opening outright.
-- **`RX_SILENT` / `RX_GAP` with zero UART errors** — the wire is intact but nothing is being
-  sent: receiver power, a receiver reset, or a dead TX driver.
+- **`RX_SILENT` / `RX_GAP` with zero UART errors** — the wire is intact but nothing was being
+  sent: receiver power, a receiver reset, or a dead TX driver. Check which event follows:
+  `RX_RESTART` means it booted again (below).
 - **No UART errors while the radio link drops** — the fault is in the air, not on the bench.
+
+### Did the receiver reboot, or did the wire just open?
+
+A drop too short to see on the rail can still be long enough to reset the receiver. The
+receiver's own state answers it: after a pause the firmware waits for the next link
+statistics frame, and
+
+- **both antenna RSSIs read 0 dBm** → the receiver has no packets yet because it is booting:
+  `RX_RESTART`, with the pause length, the cold frame and the rail at that moment.
+- **the stats come back with a real LQ and RSSI** → the receiver never lost power; the wire,
+  plug or ground opened while it kept running: `RX_GAP`.
+
+```
+EVENT,41208,RX_RESTART,receiver restarted: 180ms of silence, stats 96ms later lq 0 rssi 0/0 ant 1 mode 3; rail 4700 mV
+EVENT,41244,RX_GAP,CRSF stream paused for 220ms; receiver kept its state (lq 92 ant 1 mode 3); 3 UART error(s) around it
+```
+
+`RX_RESTART` is the signature of the fault you can otherwise miss entirely: a supply drop
+perhaps 100 ms long, far too short to notice on the display, long enough to reboot the
+receiver.
+
+Two things to keep in mind:
+
+- The ESP32 still cannot see the receiver's supply. `RX_RESTART` says the receiver *booted*;
+  the rail sample and the UART counters say whether the cause was power or the wiring.
+- If the receiver re-acquires the link before its first statistics frame, that frame reads
+  warm and the pause is reported as `RX_GAP`. Cold stats are strong evidence, not a guarantee.
+- "No packets" is not the same as "just booted". A receiver whose transmitter is switched
+  off, or that cannot hear it, also reports 0 dBm on both antennas; a pause during that would
+  be called a restart. Check the events before it: a restart is normally preceded by
+  `RX_SILENT` or `RX_GAP` on a link that was working.
+
+A drop that resets a receiver lasts tens to hundreds of milliseconds rather than
+microseconds, which is well inside what the ADC tap samples several times per
+millisecond — **provided the divider is across the receiver's own 5V pin** rather than
+upstream of the bad joint, because a dip after the tap is invisible to it. With both fitted, the pair is conclusive — `RX_RESTART` plus
+`PWR_DIP` is the supply, `RX_RESTART` with a steady rail points at the receiver's own
+connector or regulator.
 
 What it cannot do:
 
@@ -355,11 +396,15 @@ What it cannot do:
 - The event log is inferred from the CRSF stream, not measured at the receiver's supply:
   an unpowered receiver and an open TX wire both read as `RX_SILENT`. Event timestamps are
   board uptime and reset on every boot.
+- `RX_RESTART` is inference from the receiver's own first statistics frame, not a measurement
+  of its supply. If the receiver re-acquires the link before that frame, the pause is reported
+  as `RX_GAP` instead.
 - UART error counters describe the wire to the receiver only. Bytes dropped because the ESP32
   itself stalled (WiFi bursts, flash writes) are counted separately and are not cable evidence,
   and a receiver with a marginal UART driver looks the same as a bad cable.
-- Direct rail measurement needs the optional ADC tap; without it a millisecond supply dip is
-  invisible unless it interrupts the CRSF stream (`RX_GAP` / `RX_SILENT`). With it, dips
+- Direct rail measurement needs the optional ADC tap; without it a supply dip is invisible
+  unless it interrupts the CRSF stream, and then only as `RX_RESTART`, `RX_GAP` or
+  `RX_SILENT`. With it, dips
   shorter than one loop pass — WiFi bursts, flash writes, HTTP serving — can still be missed.
 - The link trace is the receiver's own view, kept in RAM for ~2.4 s. Only the summary survives
   a reboot or a reconnect, and a receiver that stops transmitting leaves no trace at all.
