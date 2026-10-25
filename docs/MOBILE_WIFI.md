@@ -165,8 +165,11 @@ about 250–350 mV under the live **5V RAIL** value.
 Once enabled:
 
 - VIN is sampled as often as the main loop allows and printed once a second as
-  `RAIL,<mV>,<lowest mV since boot>`; the page shows it as **5V RAIL** (green, or red if it
-  has ever been low).
+  `RAIL,<mV>,<lowest mV since boot>,<dip threshold>`; the page shows it as **5V RAIL**, green
+  or red if it has ever been below the threshold, with the voltage, the worst since boot and
+  the threshold in use (`4.70 V · min 4.30 V · dip < 4.40 V`). The threshold travels with the
+  reading, so if you tune `RANGELAB_RAIL_LOW_MV` on the board the page follows it instead of
+  keeping a stale copy.
 - `PWR_DIP` is recorded when VIN falls below `RANGELAB_RAIL_LOW_MV` and recovers above
   `RANGELAB_RAIL_OK_MV`, with the lowest voltage and the time spent low.
 - `RX_SILENT`, `RX_GAP` and `BOOT` details carry the VIN voltage at that moment.

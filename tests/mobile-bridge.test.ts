@@ -144,16 +144,73 @@ test('mobile: replaces the link trace when the device replays one', () => {
 });
 
 test('mobile: shows the optional 5V rail reading and ignores nonsense', () => {
-  let state = applyLine(createState(), 'RAIL,4980,4712');
-  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+  // The firmware sends the threshold this build uses, so a tuned board still
+  // colours the reading correctly.
+  let state = applyLine(createState(), 'RAIL,4980,4712,4400');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712, lowMv: 4400 });
+
+  // Older firmware omits it: the page then falls back to its own constant.
+  state = applyLine(state, 'RAIL,4980,4712');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712, lowMv: null });
 
   state = applyLine(state, 'RAIL,garbage,4712');
-  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712, lowMv: null });
   state = applyLine(state, 'RAIL,99000,4712');
-  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712, lowMv: null });
+  state = applyLine(state, 'RAIL,4980,4712,0');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712, lowMv: null });
 
   // No ADC tap wired means no RAIL lines, and the page says "not monitored".
   assert.equal(createState().rail, null);
+});
+
+test('mobile: a real firmware session fills the RX and power views', () => {
+  // Exactly the lines firmware/RangeLab_ESP32.ino prints, in the order it prints
+  // them, including the ones a link drop and a supply dip produce.
+  const session = [
+    'DEVICE,RangeLab-ESP32,1',
+    'STATUS,OUTPUTS_DISABLED_ON_BOOT',
+    'STATUS,CONTROLS_LOCKED',
+    'EVENT,120,BOOT,esp32 boot #3 (power-on); rail 4712 mV',
+    'RAIL,4712,4712,4400',
+    'WIRE,0,0,0',
+    'CH,' + filled(1000).join(','),
+    'LINK,-64,100,9',
+    'EVENT,9100,WIRE_NOISE,4 bad frame(s) and 1 sync error(s) in 12ms on the receiver UART; rail 4705 mV',
+    'EVENT,9480,RX_GAP,CRSF stream paused for 210ms; receiver kept its state (lq 96 ant 1 mode 4); 4 UART error(s) around it',
+    'EVENT,9521,RF_LINK_LOST,lq 96>0 rssi -78>-92 min -95 snr 4>-1 dlq 100>0 ant 1 mode 4 tx 100mW trend -78,-82,-86,-90,-92,-95',
+    'EVENT,9930,RF_LINK_OK,link back after 409ms; rssi -71 dBm lq 88; rail 4700 mV',
+    'RAIL,4300,4300,4400',
+    'EVENT,10440,PWR_DIP,5V rail dipped to 4300 mV for 8ms (below 4400 mV)',
+    'RAIL,4698,4300,4400',
+    'WIRE,9,2,0',
+    'TRACE_BEGIN',
+    'TRACE,9800,-78,-80,96,4,1,4,100,100,-2',
+    'TRACE,9900,-82,-84,60,2,1,4,100,96,-3',
+    'TRACE,10000,-88,-90,12,0,1,4,100,80,-4',
+    'TRACE_END',
+  ];
+  let state = createState();
+  for (const line of session) state = applyLine(state, line);
+
+  // Receiver view.
+  assert.equal(state.device, 'RangeLab-ESP32 1');
+  assert.deepEqual(state.link, { rssi: -64, lq: 100, snr: 9 });
+  assert.deepEqual(state.channels, filled(1000));
+  assert.equal(state.trace.length, 3);
+  assert.deepEqual(state.trace.at(-1), {
+    at: 10000, rssi1: -88, rssi2: -90, lq: 12, snr: 0, ant: 1, mode: 4, txPwr: 100, downLq: 80, downSnr: -4,
+  });
+
+  // Power view: live value, the worst since boot, and the threshold in use.
+  assert.deepEqual(state.rail, { mv: 4698, minMv: 4300, lowMv: 4400 });
+  // UART health view.
+  assert.deepEqual(state.wire, { bad: 9, junk: 2, ignored: 0 });
+
+  // Both kinds of trouble reach the event list, newest last.
+  const codes = state.events.map((e) => e.code);
+  assert.deepEqual(codes, ['BOOT', 'WIRE_NOISE', 'RX_GAP', 'RF_LINK_LOST', 'RF_LINK_OK', 'PWR_DIP']);
+  assert.equal(state.events.at(-1).detail, '5V rail dipped to 4300 mV for 8ms (below 4400 mV)');
 });
 
 test('mobile: rejects unsafe or nonsensical mappings', () => {

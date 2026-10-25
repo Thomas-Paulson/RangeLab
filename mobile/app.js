@@ -128,8 +128,9 @@ function buildChannelRows() {
 
 const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH', 'WIRE_NOISE', 'RX_RESTART']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK', 'PWR_OK']);
-// Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
-const RAIL_LOW_MV = 4600;
+// Fallback only: the firmware sends its own RANGELAB_RAIL_LOW_MV with each RAIL
+// line, so a tuned threshold on the board is what colours this reading.
+const RAIL_LOW_MV = 4400;
 
 function formatUptime(ms) {
   const total = Math.max(0, Math.floor(Number(ms)));
@@ -195,8 +196,9 @@ function render() {
     railCell.className = '';
   } else {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
-    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
-    railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+    const lowMv = state.rail.lowMv ?? RAIL_LOW_MV;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)} · dip < ${volts(lowMv)}`;
+    railCell.className = state.rail.minMv < lowMv ? 'bad' : 'good';
   }
 
   // Counters since the board booted, so a wiggle test shows them climbing here.

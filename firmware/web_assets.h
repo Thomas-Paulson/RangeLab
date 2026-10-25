@@ -283,7 +283,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 11261 bytes
+// 11477 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -444,15 +444,17 @@ export function applyLine(state, raw) {
     }
     return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
   }
-  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>. Absent when the
-  // divider is not wired, which is why the UI says "not monitored" instead.
+  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>[,<dip threshold>].
+  // Absent when the divider is not wired, which is why the UI says "not monitored".
+  // The threshold is optional so a page can still read an older firmware's line.
   if (upper.startsWith('RAIL,')) {
     const values = strictNumbers(line.split(',').slice(1));
     if (!values || values.length < 2) return base;
-    const [mv, minMv] = values;
+    const [mv, minMv, lowMv] = values;
     // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
-    return { ...base, rail: { mv, minMv } };
+    if (values.length >= 3 && !(lowMv > 0 && lowMv <= 12000)) return base;
+    return { ...base, rail: { mv, minMv, lowMv: values.length >= 3 ? lowMv : null } };
   }
   // Receiver UART health: WIRE,<bad frames>,<sync errors>,<errors ignored because
   // the ESP32 itself stalled>. All three only ever grow until the board restarts.
@@ -537,7 +539,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 14254 bytes
+// 14407 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -668,8 +670,9 @@ function buildChannelRows() {
 
 const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH', 'WIRE_NOISE', 'RX_RESTART']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK', 'PWR_OK']);
-// Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
-const RAIL_LOW_MV = 4600;
+// Fallback only: the firmware sends its own RANGELAB_RAIL_LOW_MV with each RAIL
+// line, so a tuned threshold on the board is what colours this reading.
+const RAIL_LOW_MV = 4400;
 
 function formatUptime(ms) {
   const total = Math.max(0, Math.floor(Number(ms)));
@@ -735,8 +738,9 @@ function render() {
     railCell.className = '';
   } else {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
-    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
-    railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+    const lowMv = state.rail.lowMv ?? RAIL_LOW_MV;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)} · dip < ${volts(lowMv)}`;
+    railCell.className = state.rail.minMv < lowMv ? 'bad' : 'good';
   }
 
   // Counters since the board booted, so a wiggle test shows them climbing here.
@@ -967,6 +971,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 38828;
+static constexpr size_t WEB_ASSETS_BYTES = 39197;
 
 #endif  // RANGELAB_WEB_ASSETS_H

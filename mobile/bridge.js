@@ -158,15 +158,17 @@ export function applyLine(state, raw) {
     }
     return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
   }
-  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>. Absent when the
-  // divider is not wired, which is why the UI says "not monitored" instead.
+  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>[,<dip threshold>].
+  // Absent when the divider is not wired, which is why the UI says "not monitored".
+  // The threshold is optional so a page can still read an older firmware's line.
   if (upper.startsWith('RAIL,')) {
     const values = strictNumbers(line.split(',').slice(1));
     if (!values || values.length < 2) return base;
-    const [mv, minMv] = values;
+    const [mv, minMv, lowMv] = values;
     // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
-    return { ...base, rail: { mv, minMv } };
+    if (values.length >= 3 && !(lowMv > 0 && lowMv <= 12000)) return base;
+    return { ...base, rail: { mv, minMv, lowMv: values.length >= 3 ? lowMv : null } };
   }
   // Receiver UART health: WIRE,<bad frames>,<sync errors>,<errors ignored because
   // the ESP32 itself stalled>. All three only ever grow until the board restarts.

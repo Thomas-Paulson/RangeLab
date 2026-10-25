@@ -14,7 +14,7 @@
   Optional 5V rail monitor: wire the rail through a 1:1 divider into an ADC1 pin
   (5V --[10k]-- GPIO34 --[10k]-- GND) and set RANGELAB_RAIL_ADC to 34 below. The
   firmware then logs PWR_DIP with the lowest voltage and its duration, and prints
-  RAIL,<mV>,<min mV> once a second. Without that wire the ESP32 cannot see the
+  RAIL,<mV>,<min mV>,<dip threshold> once a second. Without that wire the ESP32 cannot see the
   5V rail at all: receiver silence only proves the CRSF stream stopped, not why.
 
   Sampling cannot guarantee a millisecond-long rub is seen. For that, feed an
@@ -388,7 +388,9 @@ void pollRail() {
   }
   if(now - lastRailReportMs >= RAIL_REPORT_MS) {
     lastRailReportMs = now;
-    Console.printf("RAIL,%d,%d\n", railMv, railMinMv);
+    // The threshold is sent with the reading so the page colours the rail by the
+    // value this build actually uses, instead of a copy that can drift from it.
+    Console.printf("RAIL,%d,%d,%d\n", railMv, railMinMv, (int)RANGELAB_RAIL_LOW_MV);
   }
 #endif
 }
