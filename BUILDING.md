@@ -35,5 +35,5 @@ The native installer output is written below `src-tauri/target/release/bundle/`.
 
 - **No serial ports appear:** check the USB cable supports data, install the USB-UART driver for your board, then press refresh.
 - **Port opens but no channel bars move:** the current parser expects newline-delimited ASCII `CH,...` lines from the ESP32 USB bridge. Raw binary CRSF is not parsed from the USB connection yet.
-- **CLI appears but commands do nothing:** verify the selected port and baud rate. Some ESP-FC builds may need a carriage return or a firmware-specific CLI entry sequence; check the raw output before sending writes.
+- **CLI appears but commands do nothing:** verify the selected port and baud rate, and watch the raw output before sending writes. The firmware answers `PING` with `PONG`, so that is the quickest check that the link is live.
 - **Range commands rejected:** firmware parameter names vary. Inspect the CLI response, and do not issue `save` until the firmware confirms the parameters were accepted.

@@ -3,7 +3,7 @@
 Updated: 2026-10-25
 
 ## Current implementation
-- Standalone React + TypeScript desktop interface (single mapping studio view), independent of ESP-FC/Betaflight.
+- Standalone React + TypeScript desktop interface (single mapping studio view) with its own firmware (`firmware/RangeLab_ESP32.ino`); no flight-controller stack is involved.
 - Tauri 2 / Rust serial backend with port discovery, connect/disconnect, incoming serial events, and serial writes.
 - ASCII bridge telemetry parsing for `CH`, `LINK`, `CFG`, `STATUS`, `DEVICE`, and `LOG` lines.
 - Sixteen-channel display, per-channel mapping editor, profile export/import (RangeLab-profile-v1).

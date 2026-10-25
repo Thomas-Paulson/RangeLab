@@ -1,6 +1,8 @@
 # RangeLab
 
-RangeLab is a standalone native desktop application for monitoring an ExpressLRS/CRSF receiver through an ESP32-WROOM and mapping receiver channels to safe-listed ESP32 GPIO outputs. It is independent of ESP-FC.
+RangeLab is a standalone native desktop application for monitoring an ExpressLRS/CRSF receiver through an ESP32-WROOM and mapping receiver channels to safe-listed ESP32 GPIO outputs.
+
+It runs entirely on its own firmware — `firmware/RangeLab_ESP32.ino` in this repository — over USB serial or its own WiFi access point. There is no flight-controller software in the picture: nothing to be compatible with, and nothing else to install on the ESP32.
 
 ## Package contents
 
