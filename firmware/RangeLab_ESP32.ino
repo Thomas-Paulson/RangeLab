@@ -40,7 +40,7 @@ HardwareSerial CRSF(2);
 uint8_t frame[80]; size_t frameLen=0;
 uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
 String usbLine;
-bool logArmed=false; File logFile; uint32_t lastLogMs=0; uint16_t linkRssi=0,linkLq=0; int8_t linkSnr=0;
+bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
 
 void closeLogFile(){ if(logFile) logFile.close(); }
 void openLogFile(){
@@ -58,7 +58,7 @@ void logSample(){
   if(!logFile) return;
   logFile.printf("%lu",(unsigned long)millis());
   for(int i=0;i<16;i++) logFile.printf(",%u",channels[i]);
-  logFile.printf(",%u,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
+  logFile.printf(",%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
   if(logFile.size()%4096<120) logFile.flush();
 }
 void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm",false); prefs.end(); }
@@ -167,7 +167,7 @@ void handleCommand(String line) {
 void parseCrsfFrame(const uint8_t *f,size_t n) {
   if(n<4)return; uint8_t type=f[2]; const uint8_t *p=f+3; size_t plen=n-4;
   if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);Serial.print("CH");for(int i=0;i<16;i++){Serial.print(',');Serial.print(channels[i]);}Serial.println();}}
-  else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(uint16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];Serial.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
+  else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(int16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];Serial.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
 }
 void pollCrsf(){while(CRSF.available()){uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
 void setup(){Serial.begin(USB_BAUD);CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();if(logArmed){openLogFile();Serial.println("STATUS,LOG_ARMED_FIELD_MODE");}Serial.println("READY,RangeLab-ESP32,1");Serial.println("STATUS,OUTPUTS_DISABLED_ON_BOOT");}

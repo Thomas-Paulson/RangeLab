@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applySerialLine, EMPTY_TELEMETRY, pulseLabel } from '../src/lib/protocol.ts';
+import { applySerialLine, EMPTY_TELEMETRY, pulseLabel, splitLines } from '../src/lib/protocol.ts';
 
 test('parses the normal 16-channel bridge format', () => {
   const values = Array.from({ length: 16 }, (_, i) => 1000 + i * 50);
@@ -29,6 +29,21 @@ test('keeps link stats and status lines bounded and parseable', () => {
   assert.deepEqual(state.link?.values, [-68, 92, 9]);
   state = applySerialLine(state, 'STATUS,receiver online');
   assert.equal(state.statusLines.at(-1), 'receiver online');
+});
+
+test('reassembles lines split across serial chunks', () => {
+  let { lines, rest } = splitLines('', 'CH,1500,15');
+  assert.deepEqual(lines, []);
+  assert.equal(rest, 'CH,1500,15');
+  ({ lines, rest } = splitLines(rest, '00,1500\nLINK,-68,92,9\nPAR'));
+  assert.deepEqual(lines, ['CH,1500,1500,1500', 'LINK,-68,92,9']);
+  assert.equal(rest, 'PAR');
+});
+
+test('handles CRLF endings and drops empty segments', () => {
+  const { lines, rest } = splitLines('', 'STATUS,ok\r\n\r\n');
+  assert.deepEqual(lines, ['STATUS,ok']);
+  assert.equal(rest, '');
 });
 
 test('labels common pulse positions', () => {

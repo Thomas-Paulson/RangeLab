@@ -78,6 +78,14 @@ export function applySerialLine(state: TelemetryState, raw: string): TelemetrySt
   return { ...state, rawLines, lastLineAt: now };
 }
 
+/** Splits a serial chunk stream into complete lines, keeping the partial tail for the next chunk. */
+export function splitLines(buffer: string, chunk: string): { lines: string[]; rest: string } {
+  const parts = (buffer + chunk).split(/\r?\n/);
+  const rest = parts.pop() ?? '';
+  // Guard against a runaway buffer if no newline ever arrives.
+  return { lines: parts.filter(line => line.length > 0), rest: rest.length > 8192 ? '' : rest };
+}
+
 export function pulseLabel(value: number): string {
   if (value < 900) return 'LOW';
   if (value > 2100) return 'HIGH';
