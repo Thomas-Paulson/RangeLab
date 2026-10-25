@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "test": "node --experimental-strip-types --test tests/protocol.test.ts tests/mapping.test.ts tests/mobile-bridge.test.ts",
+    "test": "node --experimental-strip-types --test tests/protocol.test.ts tests/mapping.test.ts tests/mobile-bridge.test.ts tests/mobile-wiring.test.ts",
     "mobile:embed": "node scripts/embed-mobile.mjs",
     "mobile:embed:check": "node scripts/embed-mobile.mjs --check"
   },
