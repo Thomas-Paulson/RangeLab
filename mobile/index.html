@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#090d16" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>RangeLab · WiFi bridge</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #090d16;
+    --panel: linear-gradient(150deg, #121a29, #0f1522);
+    --line: #253047;
+    --text: #e9edf7;
+    --muted: #8794ad;
+    --accent: #a79cff;
+    --good: #51e0ae;
+    --bad: #ff697b;
+    --warn: #ffca83;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    color: var(--text);
+    background: radial-gradient(ellipse 120% 60% at 20% -10%, #1b2440 0, transparent 60%), var(--bg);
+    padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 14px);
+    font-size: 15px;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 14px 14px 0; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .logo {
+    width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center;
+    background: #8274ff1f; border: 1px solid #8274ff70; border-radius: 12px; color: var(--accent);
+  }
+  h1 { margin: 0; font-size: 20px; letter-spacing: -0.6px; }
+  .brand p { margin: 3px 0 0; font-size: 9px; letter-spacing: 1.2px; color: var(--muted); font-weight: 700; }
+  .pill {
+    display: flex; align-items: center; gap: 7px; flex: 0 0 auto;
+    font-size: 10px; font-weight: 750; letter-spacing: 0.7px; padding: 8px 11px; border-radius: 30px;
+    color: var(--bad); background: #ff6d7b12; border: 1px solid #713c4b;
+  }
+  .pill i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.good { color: var(--good); background: #37d8a411; border-color: #246e60; }
+  .pill.warn { color: var(--warn); background: #ffca8311; border-color: #6b5636; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px; margin-bottom: 12px; box-shadow: 0 10px 26px #00000018;
+  }
+  h2 { margin: 0; font-size: 13px; font-weight: 700; }
+  .sub { margin: 4px 0 0; font-size: 11px; color: var(--muted); }
+  .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 12px; }
+  .meta div { background: #0b111e; border: 1px solid #202b40; border-radius: 9px; padding: 9px 10px; min-width: 0; }
+  .meta span { display: block; font-size: 9px; letter-spacing: 0.8px; color: var(--muted); font-weight: 700; }
+  .meta strong {
+    display: block; margin-top: 4px; font-size: 12px; font-weight: 650;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .meta strong.on { color: var(--warn); }
+
+  .channels { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
+  .row {
+    display: grid; grid-template-columns: 42px 1fr 52px 62px; align-items: center; gap: 9px;
+    width: 100%; padding: 8px 10px; border-radius: 9px; text-align: left;
+    background: #0c1220; border: 1px solid #202b40; color: var(--text); font: inherit;
+  }
+  .row.sel { border-color: #8274ff; background: #1a1c35; box-shadow: inset 3px 0 #8a7cff; }
+  .row .n { font-size: 11px; font-weight: 750; color: #b4bfd4; }
+  .bar { height: 6px; border-radius: 20px; background: #252e41; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 20px; background: linear-gradient(90deg, #42d6a3, #8e83ff); }
+  .row b { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row em { font-size: 9px; font-style: normal; text-align: right; color: #91a0ba; white-space: nowrap; overflow: hidden; }
+  .row em.live { color: #8f86ff; }
+
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 11px; font-weight: 650; color: #b9c4d9; }
+  input, select, button { font: inherit; }
+  input, select {
+    width: 100%; background: #0b111e; border: 1px solid #2a354b; border-radius: 9px;
+    color: #e6ebf8; padding: 11px; font-size: 16px; outline: none;
+  }
+  input:focus, select:focus { border-color: #8b7cff; box-shadow: 0 0 0 2px #8b7cff22; }
+  .fields { display: flex; flex-direction: column; gap: 11px; margin-top: 12px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button {
+    padding: 12px 13px; border-radius: 10px; border: 1px solid #303a50; background: #171f30;
+    color: var(--text); font-weight: 650; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    min-height: 44px;
+  }
+  button:disabled { opacity: 0.45; }
+  .primary { background: #7768ef; border-color: #887bff; color: #fff; }
+  .danger { background: #451f2a; border-color: #743647; color: #ffb2bd; }
+  .warn { background: #4a3a22; border-color: #7d6236; color: #ffd9a0; }
+  .grow { flex: 1; }
+  .sheet { width: 100%; border-top: 1px solid #263047; margin-top: 14px; padding-top: 12px; }
+  .note { font-size: 11px; line-height: 1.5; color: var(--muted); margin: 10px 0 0; }
+  .note strong { color: #cfd7e8; }
+  .msg { font-size: 11px; margin-top: 10px; color: var(--warn); min-height: 15px; }
+  .msg.bad { color: var(--bad); }
+  #log {
+    margin-top: 10px; background: #080c14; border: 1px solid #1d2637; border-radius: 9px;
+    padding: 9px 10px; height: 132px; overflow-y: auto; color: #9fadc7;
+    font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere;
+  }
+  footer { text-align: center; color: #58657d; font-size: 10px; padding: 6px 0 0; line-height: 1.6; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">
+      <div class="logo" aria-hidden="true">◎</div>
+      <div>
+        <h1>RangeLab</h1>
+        <p>WIFI BRIDGE · PHONE MONITOR</p>
+      </div>
+    </div>
+    <div class="pill" id="link-pill"><i></i><span id="link-text">OFFLINE</span></div>
+  </header>
+
+  <section class="panel">
+    <h2>ESP32 bridge</h2>
+    <p class="sub">No app, no cable — the ESP32 serves this page over its own WiFi.</p>
+    <div class="meta">
+      <div><span>DEVICE</span><strong id="device">—</strong></div>
+      <div><span>LINK</span><strong id="link">no frames yet</strong></div>
+      <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
+      <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
+    </div>
+    <div class="actions">
+      <button class="grow" id="read-config" type="button">Read device config</button>
+      <button id="reconnect" type="button">Reconnect</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Live channels</h2>
+    <p class="sub">Pulse width in microseconds. Tap a channel to edit its mapping.</p>
+    <div class="channels" id="channels"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Channel <span id="editing">01</span> mapping</h2>
+    <p class="sub">Every change is written only when you press Apply.</p>
+    <div class="fields">
+      <label>Channel
+        <select id="f-ch"></select>
+      </label>
+      <div class="pair">
+        <label>Input min (µs)<input id="f-inmin" type="number" inputmode="numeric" min="500" max="2500" step="1" /></label>
+        <label>Input max (µs)<input id="f-inmax" type="number" inputmode="numeric" min="500" max="2500" step="1" /></label>
+      </div>
+      <label>Output mode
+        <select id="f-mode">
+          <option value="OFF">OFF</option>
+          <option value="SERVO">SERVO</option>
+          <option value="PWM">PWM</option>
+          <option value="DIGITAL">DIGITAL</option>
+          <option value="WINDOW">WINDOW</option>
+          <option value="CURVE">CURVE</option>
+        </select>
+      </label>
+      <label>ESP32 GPIO
+        <select id="f-pin"></select>
+      </label>
+      <div class="pair" id="out-range">
+        <label>Output low<input id="f-outlow" type="number" inputmode="numeric" step="1" /></label>
+        <label>Output high<input id="f-outhigh" type="number" inputmode="numeric" step="1" /></label>
+      </div>
+      <div id="curve-wrap" class="hidden">
+        <label>Curve points (µs, low → high)</label>
+        <div class="pair" id="curve-fields"></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary grow" id="apply" type="button">Apply mapping</button>
+      <button type="button" id="disable-channel">Disable channel</button>
+    </div>
+    <p class="msg" id="editor-msg"></p>
+
+    <div class="sheet">
+      <h2>Output safety</h2>
+      <p class="note">
+        Outputs stay disabled until you unlock controls and enable them here.
+        The firmware also drops every output to neutral after 500 ms without valid RC frames.
+      </p>
+      <div class="actions">
+        <button id="unlock" type="button">Unlock controls</button>
+        <button class="warn" id="enable" type="button" disabled>Enable outputs</button>
+        <button class="danger" id="disable" type="button">Disable now</button>
+      </div>
+      <p class="note" id="unlock-note">
+        Anyone connected to this WiFi network can send commands once unlocked.
+        Use a WPA2 password on the ESP32 access point and keep outputs disabled on the bench.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Device log</h2>
+    <p class="sub">Bridge messages and command feedback</p>
+    <div id="log"></div>
+  </section>
+
+  <footer>
+    RangeLab · WiFi bridge build · served from the ESP32 at 192.168.4.1<br />
+    Field-log download stays on the desktop app.
+  </footer>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

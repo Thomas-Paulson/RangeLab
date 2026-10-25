@@ -7,6 +7,7 @@ RangeLab is a standalone native desktop application for monitoring an ExpressLRS
 - `src/` React + TypeScript desktop interface.
 - `src-tauri/` Tauri 2 / Rust native desktop shell and serial-port transport.
 - `firmware/RangeLab_ESP32.ino` ESP32-WROOM CRSF receiver bridge and output mapper firmware.
+- `mobile/` phone-sized web UI served by the ESP32 over WiFi (no app install).
 - `docs/` wiring and build notes.
 - `.github/workflows/build-desktop.yml` Windows and macOS build workflow.
 
@@ -57,6 +58,23 @@ The supported output modes are `OFF`, `SERVO`, `PWM`, `DIGITAL`, `WINDOW` (outpu
 
 The log wraps at about 1.8 MB (roughly 30–40 minutes at 10 Hz): the oldest data is overwritten and an `OVERFLOW` marker is written, and the app shows a "LOG OVERFLOWED" notice so you know data was replaced. Serial commands: `LOG START`, `LOG STOP`, `LOG DUMP`, `LOG CLEAR`.
 
+## Phone over WiFi (no app, no cable)
+
+This branch adds a WiFi bridge to the firmware so a phone can watch channels and edit
+mappings without USB. That matters most for iPhone: iOS has no public USB-serial API, so an
+ESP32 plugged into an iPhone can never be read by an app.
+
+1. Flash `firmware/RangeLab_ESP32.ino` (needs the **WebSockets** library by Markus Sattler).
+2. On the phone, join the `RANGELAB-XXXX` access point the ESP32 creates (default password
+   `rangelab1234` — change `WIFI_AP_PASSWORD` in the sketch).
+3. Open **http://192.168.4.1** in Safari or Chrome.
+
+Outputs and mapping writes stay locked until you press **Unlock controls**, and `DISABLE`
+is always accepted. Field-log download stays on USB. Full setup, safety model and
+limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
+
+Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.
+
 ## Build in the cloud (GitHub Actions)
 
 You do not need a local toolchain. The workflow `.github/workflows/build-desktop.yml` builds everything on GitHub's runners:
@@ -79,10 +97,12 @@ To sign the macOS app properly, add these repository secrets: `APPLE_CERTIFICATE
 ```text
 rangelab/
 ├── firmware/RangeLab_ESP32.ino
+├── firmware/web_assets.h  # generated from mobile/ by `npm run mobile:embed`
+├── mobile/               # phone UI served by the ESP32 over WiFi
 ├── src/                  # React UI and protocol handling
 ├── src-tauri/            # Native Rust serial transport and Tauri config
 ├── tests/                # Parser/profile/firmware identification tests
-├── docs/                 # Wiring and troubleshooting
+├── docs/                 # Wiring, mobile WiFi and troubleshooting
 ├── scripts/              # Convenience build scripts
 └── README.md
 ```

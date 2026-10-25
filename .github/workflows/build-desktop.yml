@@ -17,14 +17,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the embedded phone UI is up to date
+        run: npm run mobile:embed:check
       - uses: arduino/setup-arduino-cli@v2
       - run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          # WiFi bridge transport (https://github.com/Links2004/arduinoWebSockets)
+          arduino-cli lib install "WebSockets"
       - run: |
           # arduino-cli requires the sketch folder to match the .ino name
           mkdir -p sketch/RangeLab_ESP32
-          cp firmware/RangeLab_ESP32.ino sketch/RangeLab_ESP32/
+          cp firmware/RangeLab_ESP32.ino firmware/web_assets.h sketch/RangeLab_ESP32/
           arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir build sketch/RangeLab_ESP32 --warnings default
       - uses: actions/upload-artifact@v4
         with:
