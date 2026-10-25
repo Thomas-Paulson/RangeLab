@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 9903 bytes
+// 11537 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -116,6 +116,23 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
     padding: 9px 10px; height: 132px; overflow-y: auto; color: #9fadc7;
     font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere;
   }
+  #event-count { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .events {
+    margin-top: 10px; background: #080c14; border: 1px solid #1d2637; border-radius: 9px;
+    padding: 6px 10px; max-height: 210px; overflow-y: auto;
+    font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .ev {
+    display: grid; grid-template-columns: 52px 94px 1fr; gap: 7px; align-items: baseline;
+    padding: 3px 0; border-bottom: 1px solid #141b28;
+  }
+  .ev:last-child { border-bottom: 0; }
+  .ev span { color: #58657d; }
+  .ev b { color: var(--warn); font-weight: 600; }
+  .ev b.bad { color: var(--bad); }
+  .ev b.good { color: var(--good); }
+  .ev em { color: #9fadc7; font-style: normal; overflow-wrap: anywhere; }
+  .ev.empty { display: block; color: #58657d; }
   footer { text-align: center; color: #58657d; font-size: 10px; padding: 6px 0 0; line-height: 1.6; }
   .hidden { display: none !important; }
 </style>
@@ -212,6 +229,22 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
   </section>
 
   <section class="panel">
+    <h2>Link events <span id="event-count">0</span></h2>
+    <p class="sub">Kept in ESP32 flash across restarts. Newest first, in board uptime.</p>
+    <div id="events" class="events"></div>
+    <div class="actions">
+      <button class="grow" id="load-events" type="button">Load events</button>
+      <button type="button" id="clear-events">Clear log</button>
+    </div>
+    <p class="note">
+      <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
+      <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
+      <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
+      <strong>BOOT</strong> — the ESP32 restarted; a rising number means it lost power too.
+    </p>
+  </section>
+
+  <section class="panel">
     <h2>Device log</h2>
     <p class="sub">Bridge messages and command feedback</p>
     <div id="log"></div>
@@ -227,7 +260,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 7708 bytes
+// 9143 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -237,6 +270,7 @@ static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge
 // ships straight to the phone with no build step).
 
 export const CHANNEL_COUNT = 16;
+export const MAX_EVENTS = 200;
 export const SAFE_PINS = [13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
 export const MODES = ['OFF', 'SERVO', 'PWM', 'DIGITAL', 'WINDOW', 'CURVE'];
 export const DEFAULT_CURVE = [1000, 1250, 1500, 1750, 2000];
@@ -263,6 +297,9 @@ export function createState() {
     outputsEnabled: false,
     controlsUnlocked: false,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
+    events: [],
+    eventDraft: null,
+    eventsVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
     lastLineAt: null,
@@ -350,7 +387,33 @@ export function applyLine(state, raw) {
     else if (text === 'OUTPUTS_DISABLED' || text === 'OUTPUTS_DISABLED_ON_BOOT') next.outputsEnabled = false;
     if (text === 'CONTROLS_UNLOCKED') next.controlsUnlocked = true;
     else if (text === 'CONTROLS_LOCKED' || text === 'CONTROLS_RELOCKED_IDLE') next.controlsUnlocked = false;
+    if (text === 'EVENTS_CLEARED') {
+      next.events = [];
+      next.eventDraft = null;
+      next.eventsVersion = base.eventsVersion + 1;
+    }
     return next;
+  }
+  // The ESP32 keeps link/receiver trouble in flash. EVENTS replays it between
+  // EVENT_DUMP_BEGIN and EVENT_END, and live events arrive as EVENT lines too.
+  if (upper.startsWith('EVENT_DUMP_BEGIN')) {
+    return { ...base, eventDraft: [], eventsVersion: base.eventsVersion + 1 };
+  }
+  if (upper.startsWith('EVENT_END')) {
+    // An empty dump (no flash, or cleared) must not wipe live events already shown.
+    const final = base.eventDraft && base.eventDraft.length ? base.eventDraft : base.events;
+    return { ...base, events: final.slice(-MAX_EVENTS), eventDraft: null, eventsVersion: base.eventsVersion + 1 };
+  }
+  if (upper.startsWith('EVENT,')) {
+    const parts = line.split(',');
+    const at = Number(parts[1]);
+    const code = String(parts[2] ?? '').trim().toUpperCase();
+    if (!Number.isFinite(at) || !code) return base;
+    const event = { at, code, detail: parts.slice(3).join(',').trim() };
+    if (base.eventDraft) {
+      return { ...base, eventDraft: base.eventDraft.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
+    }
+    return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
   }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };
@@ -410,7 +473,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 10547 bytes
+// 12163 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -436,6 +499,7 @@ let selected = 1;
 let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
 let renderedLineCount = -1;
+let renderedEventVersion = -1;
 let lastFrame = 0;
 let enableArmedAt = 0;
 let curveInputs = [];
@@ -480,8 +544,9 @@ function connect() {
   ws.onopen = () => {
     retryMs = RETRY_MIN_MS;
     setPill('good', 'CONNECTED');
-    push('Bridge connected. Sending GET.');
+    push('Bridge connected. Reading config and event log.');
     ws.send('GET');
+    ws.send('EVENTS');
   };
   ws.onmessage = (event) => {
     const { lines, rest } = splitLines(rxBuffer, String(event.data));
@@ -535,6 +600,37 @@ function buildChannelRows() {
   }
 }
 
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST']);
+const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK']);
+
+function formatUptime(ms) {
+  const total = Math.max(0, Math.floor(Number(ms)));
+  const minutes = Math.floor(total / 60000);
+  const seconds = Math.floor((total % 60000) / 1000);
+  const tenths = Math.floor((total % 1000) / 100);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${tenths}`;
+}
+
+// Timestamps are ESP32 uptime, so they restart with the board. Newest first.
+function renderEvents() {
+  if (state.eventsVersion === renderedEventVersion) return;
+  renderedEventVersion = state.eventsVersion;
+  el('event-count').textContent = String(state.events.length);
+  const host = el('events');
+  if (!state.events.length) {
+    host.innerHTML = '<div class="ev empty">No events recorded yet.</div>';
+    return;
+  }
+  host.innerHTML = state.events
+    .slice()
+    .reverse()
+    .map((event) => {
+      const kind = EVENT_BAD.has(event.code) ? 'bad' : EVENT_GOOD.has(event.code) ? 'good' : '';
+      return `<div class="ev"><span>${formatUptime(event.at)}</span><b class="${kind}">${escapeHtml(event.code)}</b><em>${escapeHtml(event.detail)}</em></div>`;
+    })
+    .join('');
+}
+
 function render() {
   const now = Date.now();
   const signal = state.channelUpdatedAt !== null && now - state.channelUpdatedAt < 700;
@@ -567,6 +663,8 @@ function render() {
     enableArmedAt = 0;
     el('enable').textContent = 'Enable outputs';
   }
+
+  renderEvents();
 
   if (state.lineCount !== renderedLineCount) {
     renderedLineCount = state.lineCount;
@@ -707,6 +805,14 @@ function wire() {
   loadEditor();
 
   el('read-config').addEventListener('click', () => send('GET'));
+  el('load-events').addEventListener('click', () => send('EVENTS'));
+  el('clear-events').addEventListener('click', () => {
+    if (!state.controlsUnlocked) {
+      push('Unlock controls before clearing the event log.');
+      return;
+    }
+    send('EVENTS,CLEAR');
+  });
   el('reconnect').addEventListener('click', () => { retryMs = RETRY_MIN_MS; connect(); });
   el('apply').addEventListener('click', applyMapping);
 
@@ -748,6 +854,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 28158;
+static constexpr size_t WEB_ASSETS_BYTES = 32843;
 
 #endif  // RANGELAB_WEB_ASSETS_H

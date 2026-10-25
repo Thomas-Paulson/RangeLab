@@ -63,10 +63,55 @@ Nothing here needs a router or a cellular signal. The ESP32 is the network.
 - Per-channel mapping editor: input min/max, mode (`OFF`, `SERVO`, `PWM`, `DIGITAL`,
   `WINDOW`, `CURVE`), GPIO, output range and the five curve points.
 - Enable and disable GPIO outputs.
+- Read (and, once unlocked, clear) the link/receiver event log kept in the ESP32's flash.
 
 It deliberately does **not** do field-log download — a full dump is ~1.8 MB of ASCII, which
 is too much for the bridge and it would stall the RC loop for seconds. `LOG DUMP` is
 refused while a phone is connected; use USB for that.
+
+## Link and receiver event log
+
+The firmware records link and receiver trouble as short events — state changes, not
+samples — and keeps them in flash, so a fault survives a reboot and can be read from the
+phone alone. The page loads the log when it connects; **Load events** re-reads it and
+**Clear log** erases it once controls are unlocked. The same lines print over USB, so
+`EVENTS` and `EVENTS,CLEAR` work from the desktop app's CLI too.
+
+| Event | Meaning |
+| --- | --- |
+| `BOOT` | ESP32 started, numbered. A count that keeps climbing means the board itself is resetting (brownout, unstable supply, or a crash). |
+| `RX_SILENT` | No CRSF bytes at all for 1 s: the receiver stopped transmitting. |
+| `RX_ACTIVE` | Receiver bytes resumed. |
+| `RF_LINK_LOST` | The receiver is still transmitting but its link statistics report 0% LQ. |
+| `RF_LINK_OK` | Link quality is back. |
+| `RC_LOST` | Channel frames stopped while the receiver kept transmitting. |
+| `RC_OK` | Channel frames returned. |
+
+Lines look like `EVENT,<uptime ms>,<code>,<detail>`, for example
+`EVENT,184312,RX_SILENT,no CRSF bytes for 1000ms; last rssi -88 dBm lq 0 snr 1`.
+Timestamps are board uptime, so they restart with the board — use the `BOOT` rows as the
+boundary between runs. The file holds roughly 150 entries; when it fills, the oldest half
+is dropped and a `LOG_WRAPPED` entry records that.
+
+### What it can and cannot tell apart
+
+`RX_SILENT` means the ESP32 saw *nothing* on GPIO16. Losing the receiver's power, its
+ground, or its TX wire all remove the signal, and the ESP32 cannot distinguish those three
+— they are the same electrical condition at its pin. What it *can* separate is:
+
+- **Receiver alive, RF link gone** — ExpressLRS keeps sending CRSF frames (failsafe channel
+  values and link statistics) while the receiver is powered, so you get `RF_LINK_LOST`
+  (usually with `RC_LOST`), with no `RX_SILENT` before it.
+- **Receiver stopped transmitting** — all bytes stop, so you get `RX_SILENT` and no
+  `RF_LINK_LOST` immediately before it.
+
+If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the moment it
+happens; the `BOOT` counter increments when it comes back. That is how an ESP32-side reset
+or brownout is told apart from a receiver-side dropout.
+
+A receiver that boots with no transmitter powered reports 0% LQ until its first packet;
+the firmware only reports `RF_LINK_LOST` after it has seen a real link, so cold boots do
+not fill the log with noise.
 
 ## Safety model
 
@@ -91,6 +136,9 @@ refused while a phone is connected; use USB for that.
 - The bridge speaks the ASCII line protocol, not raw CRSF over the network.
 - The phone page is a monitor and mapping editor. Profile import/export stays in the
   desktop app.
+- The event log is inferred from the CRSF stream, not measured at the receiver's supply:
+  an unpowered receiver and an open TX wire both read as `RX_SILENT`. Event timestamps are
+  board uptime and reset on every boot.
 
 ## USB-only build
 

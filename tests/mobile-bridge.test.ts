@@ -72,6 +72,45 @@ test('mobile: logs bridge chatter but drops field-log size and end markers', () 
   assert.equal(state.lineCount, afterSize + 2);
 });
 
+test('mobile: collects live link events and replaces them with the device dump', () => {
+  let state = applyLine(createState(), 'EVENT,1200,RX_SILENT,no CRSF bytes for 1000ms; last rssi -80 dBm lq 0 snr 2');
+  assert.equal(state.events.length, 1);
+  assert.deepEqual(state.events[0], {
+    at: 1200,
+    code: 'RX_SILENT',
+    detail: 'no CRSF bytes for 1000ms; last rssi -80 dBm lq 0 snr 2',
+  });
+  assert.equal(state.eventsVersion, 1);
+
+  // A dump is authoritative: it replaces what was shown and keeps flash order.
+  state = applyLine(state, 'EVENT_DUMP_BEGIN');
+  assert.deepEqual(state.eventDraft, []);
+  state = applyLine(state, 'EVENT,400,BOOT,esp32 boot #3');
+  state = applyLine(state, 'EVENT,900,RF_LINK_LOST,link quality 0% rssi -90 dBm snr -4');
+  state = applyLine(state, 'EVENT,1400,RF_LINK_OK,receiver reports link quality again');
+  state = applyLine(state, 'EVENT_END');
+  assert.equal(state.eventDraft, null);
+  assert.deepEqual(state.events.map((event) => event.code), ['BOOT', 'RF_LINK_LOST', 'RF_LINK_OK']);
+});
+
+test('mobile: an empty dump keeps live events, and clearing empties the list', () => {
+  let state = applyLine(createState(), 'EVENT,50,RX_ACTIVE,receiver is transmitting again');
+  assert.equal(state.events.length, 1);
+
+  state = applyLine(state, 'EVENT_DUMP_BEGIN');
+  state = applyLine(state, 'EVENT_END');
+  assert.equal(state.events.length, 1);
+
+  state = applyLine(state, 'STATUS,EVENTS_CLEARED');
+  assert.deepEqual(state.events, []);
+
+  // Malformed events are ignored rather than rendered.
+  state = applyLine(state, 'EVENT,not-a-time,RX_SILENT,detail');
+  state = applyLine(state, 'EVENT,10,RX_SILENT');
+  assert.deepEqual(state.events.map((event) => event.code), ['RX_SILENT']);
+  assert.equal(state.events[0].detail, '');
+});
+
 test('mobile: rejects unsafe or nonsensical mappings', () => {
   const ok = { ...emptyMapping(1), mode: 'SERVO', pin: 13, outLow: 1000, outHigh: 2000 };
   assert.equal(validateMapping(ok).ok, true);

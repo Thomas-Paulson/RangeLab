@@ -70,8 +70,11 @@ ESP32 plugged into an iPhone can never be read by an app.
 3. Open **http://192.168.4.1** in Safari or Chrome.
 
 Outputs and mapping writes stay locked until you press **Unlock controls**, and `DISABLE`
-is always accepted. Field-log download stays on USB. Full setup, safety model and
-limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
+is always accepted. The page also shows the link/receiver **event log** the ESP32 keeps in
+flash (`RX_SILENT` for a receiver that stopped transmitting, `RF_LINK_LOST` for a lost RF
+link, `BOOT` for an ESP32 restart), and can clear it once unlocked. Field-log download
+stays on USB. Full setup, safety model and limitations:
+[docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.
 

@@ -7,6 +7,7 @@
 // ships straight to the phone with no build step).
 
 export const CHANNEL_COUNT = 16;
+export const MAX_EVENTS = 200;
 export const SAFE_PINS = [13, 14, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
 export const MODES = ['OFF', 'SERVO', 'PWM', 'DIGITAL', 'WINDOW', 'CURVE'];
 export const DEFAULT_CURVE = [1000, 1250, 1500, 1750, 2000];
@@ -33,6 +34,9 @@ export function createState() {
     outputsEnabled: false,
     controlsUnlocked: false,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
+    events: [],
+    eventDraft: null,
+    eventsVersion: 0,
     logs: ['Waiting for the ESP32 WiFi bridge.'],
     lineCount: 0,
     lastLineAt: null,
@@ -120,7 +124,33 @@ export function applyLine(state, raw) {
     else if (text === 'OUTPUTS_DISABLED' || text === 'OUTPUTS_DISABLED_ON_BOOT') next.outputsEnabled = false;
     if (text === 'CONTROLS_UNLOCKED') next.controlsUnlocked = true;
     else if (text === 'CONTROLS_LOCKED' || text === 'CONTROLS_RELOCKED_IDLE') next.controlsUnlocked = false;
+    if (text === 'EVENTS_CLEARED') {
+      next.events = [];
+      next.eventDraft = null;
+      next.eventsVersion = base.eventsVersion + 1;
+    }
     return next;
+  }
+  // The ESP32 keeps link/receiver trouble in flash. EVENTS replays it between
+  // EVENT_DUMP_BEGIN and EVENT_END, and live events arrive as EVENT lines too.
+  if (upper.startsWith('EVENT_DUMP_BEGIN')) {
+    return { ...base, eventDraft: [], eventsVersion: base.eventsVersion + 1 };
+  }
+  if (upper.startsWith('EVENT_END')) {
+    // An empty dump (no flash, or cleared) must not wipe live events already shown.
+    const final = base.eventDraft && base.eventDraft.length ? base.eventDraft : base.events;
+    return { ...base, events: final.slice(-MAX_EVENTS), eventDraft: null, eventsVersion: base.eventsVersion + 1 };
+  }
+  if (upper.startsWith('EVENT,')) {
+    const parts = line.split(',');
+    const at = Number(parts[1]);
+    const code = String(parts[2] ?? '').trim().toUpperCase();
+    if (!Number.isFinite(at) || !code) return base;
+    const event = { at, code, detail: parts.slice(3).join(',').trim() };
+    if (base.eventDraft) {
+      return { ...base, eventDraft: base.eventDraft.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
+    }
+    return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
   }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };

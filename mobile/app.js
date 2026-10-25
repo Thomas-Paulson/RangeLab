@@ -23,6 +23,7 @@ let selected = 1;
 let retryMs = RETRY_MIN_MS;
 let rxBuffer = '';
 let renderedLineCount = -1;
+let renderedEventVersion = -1;
 let lastFrame = 0;
 let enableArmedAt = 0;
 let curveInputs = [];
@@ -67,8 +68,9 @@ function connect() {
   ws.onopen = () => {
     retryMs = RETRY_MIN_MS;
     setPill('good', 'CONNECTED');
-    push('Bridge connected. Sending GET.');
+    push('Bridge connected. Reading config and event log.');
     ws.send('GET');
+    ws.send('EVENTS');
   };
   ws.onmessage = (event) => {
     const { lines, rest } = splitLines(rxBuffer, String(event.data));
@@ -122,6 +124,37 @@ function buildChannelRows() {
   }
 }
 
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST']);
+const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK']);
+
+function formatUptime(ms) {
+  const total = Math.max(0, Math.floor(Number(ms)));
+  const minutes = Math.floor(total / 60000);
+  const seconds = Math.floor((total % 60000) / 1000);
+  const tenths = Math.floor((total % 1000) / 100);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${tenths}`;
+}
+
+// Timestamps are ESP32 uptime, so they restart with the board. Newest first.
+function renderEvents() {
+  if (state.eventsVersion === renderedEventVersion) return;
+  renderedEventVersion = state.eventsVersion;
+  el('event-count').textContent = String(state.events.length);
+  const host = el('events');
+  if (!state.events.length) {
+    host.innerHTML = '<div class="ev empty">No events recorded yet.</div>';
+    return;
+  }
+  host.innerHTML = state.events
+    .slice()
+    .reverse()
+    .map((event) => {
+      const kind = EVENT_BAD.has(event.code) ? 'bad' : EVENT_GOOD.has(event.code) ? 'good' : '';
+      return `<div class="ev"><span>${formatUptime(event.at)}</span><b class="${kind}">${escapeHtml(event.code)}</b><em>${escapeHtml(event.detail)}</em></div>`;
+    })
+    .join('');
+}
+
 function render() {
   const now = Date.now();
   const signal = state.channelUpdatedAt !== null && now - state.channelUpdatedAt < 700;
@@ -154,6 +187,8 @@ function render() {
     enableArmedAt = 0;
     el('enable').textContent = 'Enable outputs';
   }
+
+  renderEvents();
 
   if (state.lineCount !== renderedLineCount) {
     renderedLineCount = state.lineCount;
@@ -294,6 +329,14 @@ function wire() {
   loadEditor();
 
   el('read-config').addEventListener('click', () => send('GET'));
+  el('load-events').addEventListener('click', () => send('EVENTS'));
+  el('clear-events').addEventListener('click', () => {
+    if (!state.controlsUnlocked) {
+      push('Unlock controls before clearing the event log.');
+      return;
+    }
+    send('EVENTS,CLEAR');
+  });
   el('reconnect').addEventListener('click', () => { retryMs = RETRY_MIN_MS; connect(); });
   el('apply').addEventListener('click', applyMapping);
 

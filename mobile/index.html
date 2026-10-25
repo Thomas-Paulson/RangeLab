@@ -107,6 +107,23 @@
     padding: 9px 10px; height: 132px; overflow-y: auto; color: #9fadc7;
     font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere;
   }
+  #event-count { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .events {
+    margin-top: 10px; background: #080c14; border: 1px solid #1d2637; border-radius: 9px;
+    padding: 6px 10px; max-height: 210px; overflow-y: auto;
+    font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .ev {
+    display: grid; grid-template-columns: 52px 94px 1fr; gap: 7px; align-items: baseline;
+    padding: 3px 0; border-bottom: 1px solid #141b28;
+  }
+  .ev:last-child { border-bottom: 0; }
+  .ev span { color: #58657d; }
+  .ev b { color: var(--warn); font-weight: 600; }
+  .ev b.bad { color: var(--bad); }
+  .ev b.good { color: var(--good); }
+  .ev em { color: #9fadc7; font-style: normal; overflow-wrap: anywhere; }
+  .ev.empty { display: block; color: #58657d; }
   footer { text-align: center; color: #58657d; font-size: 10px; padding: 6px 0 0; line-height: 1.6; }
   .hidden { display: none !important; }
 </style>
@@ -200,6 +217,22 @@
         Use a WPA2 password on the ESP32 access point and keep outputs disabled on the bench.
       </p>
     </div>
+  </section>
+
+  <section class="panel">
+    <h2>Link events <span id="event-count">0</span></h2>
+    <p class="sub">Kept in ESP32 flash across restarts. Newest first, in board uptime.</p>
+    <div id="events" class="events"></div>
+    <div class="actions">
+      <button class="grow" id="load-events" type="button">Load events</button>
+      <button type="button" id="clear-events">Clear log</button>
+    </div>
+    <p class="note">
+      <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
+      <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
+      <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
+      <strong>BOOT</strong> — the ESP32 restarted; a rising number means it lost power too.
+    </p>
   </section>
 
   <section class="panel">

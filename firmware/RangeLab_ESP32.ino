@@ -16,7 +16,8 @@
           UNLOCK; DISABLE is always accepted.
   Commands: GET, SET,ch,min,max,mode,pin,outLow,outHigh[,curve x5], ENABLE, DISABLE, PING,
             LOG START|STOP|DUMP|CLEAR (field logging to internal flash, 10 Hz, persists across
-            restarts; wraps when full and records an OVERFLOW marker).
+            restarts; wraps when full and records an OVERFLOW marker),
+            EVENTS[,CLEAR] (short link/receiver trouble log, also in internal flash).
   Modes: OFF, SERVO (microseconds), PWM (0..255), DIGITAL (threshold at midpoint),
          WINDOW (output high inside outLow..outHigh band), CURVE (5-point servo curve).
   Never connect motors/servos directly to GPIO if their current exceeds GPIO capability.
@@ -44,6 +45,14 @@
 static constexpr size_t LOG_FILE_MAX = 1800000; // ~30-40 min at 10 Hz
 static constexpr const char* LOG_PATH = "/fieldlog.csv";
 
+// Event log: a short, reboot-surviving record of link and receiver trouble, so a
+// fault can be read back from a phone with no laptop attached. Entries are rare
+// (state changes, not samples), so the file stays small.
+static constexpr const char* EVENT_PATH = "/events.log";
+static constexpr size_t EVENT_FILE_MAX = 6000;   // ~150 entries before the oldest half is dropped
+static constexpr uint32_t RX_SILENT_MS = 1000;   // no CRSF bytes at all for this long
+static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
+
 static constexpr int CRSF_RX_PIN = 16;
 static constexpr uint32_t USB_BAUD = 115200;
 static constexpr uint32_t CRSF_BAUD = 420000;
@@ -64,6 +73,11 @@ uint8_t frame[80]; size_t frameLen=0;
 uint32_t lastRcMs=0; bool outputsEnabled=false; bool wasFailsafe=true;
 String usbLine;
 bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uint16_t linkLq=0; int8_t linkSnr=0;
+// Event detection state. rxSilent stays true until the receiver has sent bytes at
+// least once, so a board that boots with no receiver attached logs BOOT only.
+uint32_t lastCrsfByteMs=0; uint32_t lastLinkStatMs=0; uint32_t lastEventScanMs=0;
+bool rxSilent=true; bool rcLost=false; bool rfLinkLost=false; bool sawLinkQuality=false; bool rxHeard=false;
+uint16_t bootCount=0;
 
 // The console printer and its WebSocket capture live below the type
 // declarations on purpose: arduino-cli injects auto-generated prototypes just
@@ -149,6 +163,116 @@ void logSample(){
   if(logFile.size()%4096<120) logFile.flush();
 }
 void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm",false); prefs.end(); }
+
+// ---------------------------------------------------------------------------
+// Event log: link and receiver trouble, kept in flash across restarts.
+//   RX_SILENT     no CRSF bytes at all: the receiver stopped transmitting. This
+//                 is what an unpowered receiver (or an open TX/ground wire) looks
+//                 like from the ESP32.
+//   RX_ACTIVE     the receiver is transmitting again.
+//   RF_LINK_LOST  the receiver is alive and talking, but reports 0% link quality.
+//   RF_LINK_OK    link quality is back.
+//   RC_LOST       channel frames stopped while the receiver keeps transmitting.
+//   RC_OK         channel frames are back.
+//   BOOT          ESP32 start-up, numbered: a growing count means resets.
+// ---------------------------------------------------------------------------
+void compactEventLog() {
+  File in = LittleFS.open(EVENT_PATH, "r");
+  if(!in) return;
+  String all = in.readString();
+  in.close();
+  if(all.length() < 2) return;
+  const int cut = all.indexOf('\n', all.length()/2);
+  String tail = cut >= 0 ? all.substring(cut+1) : String();
+  File out = LittleFS.open(EVENT_PATH, "w");
+  if(!out) return;
+  out.print("EVENT,0,LOG_WRAPPED,oldest entries dropped to keep the log small\n");
+  out.print(tail);
+  out.close();
+}
+void eventAppend(const char* code, const char* detail) {
+  char line[192];
+  if(detail && *detail) snprintf(line, sizeof(line), "EVENT,%lu,%s,%s", (unsigned long)millis(), code, detail);
+  else snprintf(line, sizeof(line), "EVENT,%lu,%s", (unsigned long)millis(), code);
+  Console.println(line);              // live view over USB and to every connected phone
+  if(!LittleFS.begin(true)) return;   // no flash: the live line is all that can be offered
+  File f = LittleFS.open(EVENT_PATH, "a");
+  if(!f) return;
+  if(f.size() > EVENT_FILE_MAX) { f.close(); compactEventLog(); f = LittleFS.open(EVENT_PATH, "a"); if(!f) return; }
+  f.println(line);
+  f.close();
+}
+void dumpEventLog() {
+  if(!LittleFS.begin(true)) { Console.println("ERROR,event flash unavailable"); return; }
+  Console.println("EVENT_DUMP_BEGIN");
+  File f = LittleFS.open(EVENT_PATH, "r");
+  if(f) {
+    while(f.available()) { String l = f.readStringUntil('\n'); l.trim(); if(l.length()) Console.println(l); }
+    f.close();
+  }
+  Console.println("EVENT_END");
+}
+void logBootEvent() {
+  prefs.begin("rangelab", false);
+  bootCount = prefs.getUShort("boots", 0) + 1;
+  prefs.putUShort("boots", bootCount);
+  prefs.end();
+  char detail[48];
+  snprintf(detail, sizeof(detail), "esp32 boot #%u", (unsigned)bootCount);
+  eventAppend("BOOT", detail);
+}
+void scanEvents() {
+  const uint32_t now = millis();
+  if(now - lastEventScanMs < EVENT_SCAN_MS) return;
+  lastEventScanMs = now;
+
+  // Nothing heard since boot is silence, not activity: no RX_ACTIVE until a real byte.
+  const bool silentNow = !rxHeard || (now - lastCrsfByteMs) > RX_SILENT_MS;
+  if(silentNow != rxSilent) {
+    rxSilent = silentNow;
+    if(rxSilent) {
+      char detail[120];
+      snprintf(detail, sizeof(detail), "no CRSF bytes for %lums; last rssi %d dBm lq %u snr %d",
+               (unsigned long)RX_SILENT_MS, (int)linkRssi, (unsigned)linkLq, (int)linkSnr);
+      eventAppend("RX_SILENT", detail);
+    } else {
+      eventAppend("RX_ACTIVE", "receiver is transmitting again");
+      lastLinkStatMs = 0;  // wait for fresh statistics before judging link quality
+    }
+    rcLost = false;
+    rfLinkLost = false;
+    sawLinkQuality = false;
+  }
+  if(rxSilent) return;
+
+  // Link quality is only meaningful while the receiver is still sending stats, and
+  // only once it has reported a real link: an RX that just booted also reads 0
+  // until its first packet, and that is not a loss.
+  const bool freshStats = lastLinkStatMs != 0 && (now - lastLinkStatMs) <= RX_SILENT_MS;
+  if(freshStats && linkLq > 0) sawLinkQuality = true;
+  const bool rfLostNow = freshStats && sawLinkQuality && linkLq == 0;
+  if(rfLostNow != rfLinkLost) {
+    rfLinkLost = rfLostNow;
+    if(rfLostNow) {
+      char detail[96];
+      snprintf(detail, sizeof(detail), "link quality 0%% rssi %d dBm snr %d", linkRssi, (int)linkSnr);
+      eventAppend("RF_LINK_LOST", detail);
+    } else {
+      eventAppend("RF_LINK_OK", "receiver reports link quality again");
+    }
+  }
+
+  // Channel frames missing while the receiver is demonstrably alive and talking.
+  // Bytes must still be arriving: if the whole UART is quiet, the coming RX_SILENT
+  // describes it and a separate RC_LOST event would only add noise.
+  const bool uartAlive = (now - lastCrsfByteMs) <= (RC_TIMEOUT_MS / 2);
+  const bool rcLostNow = uartAlive && lastRcMs != 0 && (now - lastRcMs) > RC_TIMEOUT_MS;
+  if(rcLostNow != rcLost) {
+    rcLost = rcLostNow;
+    if(rcLostNow) eventAppend("RC_LOST", "no channel frames while the receiver is still transmitting");
+    else eventAppend("RC_OK", "channel frames are back");
+  }
+}
 
 bool safePin(int pin) { for (auto p: SAFE_PINS) if (p == pin) return true; return false; }
 const char* modeName(OutputMode m) { switch(m){case MODE_SERVO:return "SERVO";case MODE_PWM:return "PWM";case MODE_DIGITAL:return "DIGITAL";case MODE_WINDOW:return "WINDOW";case MODE_CURVE:return "CURVE";default:return "OFF";} }
@@ -254,7 +378,14 @@ void handleCommand(String line) {
       if(logArmed)openLogFile(); return;
     }
   }
-  Console.println("ERROR,unknown command; use GET, SET, ENABLE, DISABLE, PING, LOG START|STOP|DUMP|CLEAR");
+  if(line.equalsIgnoreCase("EVENTS")) { dumpEventLog(); return; }
+  if(line.equalsIgnoreCase("EVENTS,CLEAR")) {
+    if(!LittleFS.begin(true)){Console.println("ERROR,event flash unavailable");return;}
+    LittleFS.remove(EVENT_PATH);
+    Console.println("STATUS,EVENTS_CLEARED");
+    return;
+  }
+  Console.println("ERROR,unknown command; use GET, SET, ENABLE, DISABLE, PING, LOG START|STOP|DUMP|CLEAR, EVENTS[,CLEAR]");
 }
 
 #if RANGELAB_WIFI
@@ -265,7 +396,8 @@ void handleRemoteCommand(String line) {
   line.trim(); if(!line.length()) return;
   if(line.equalsIgnoreCase("UNLOCK")) { controlsUnlocked=true; lastControlMs=millis(); Console.println("STATUS,CONTROLS_UNLOCKED"); return; }
   if(line.equalsIgnoreCase("LOCK")) { controlsUnlocked=false; Console.println("STATUS,CONTROLS_LOCKED"); return; }
-  const bool mutating = line.startsWith("SET,") || line.equalsIgnoreCase("ENABLE") || line.startsWith("LOG");
+  const bool mutating = line.startsWith("SET,") || line.equalsIgnoreCase("ENABLE") || line.startsWith("LOG")
+                     || line.equalsIgnoreCase("EVENTS,CLEAR");
   if(mutating && !controlsUnlocked) { Console.println("ERROR,controls are locked; unlock in the app before writing"); return; }
   lastControlMs=millis();
   handleCommand(line);
@@ -342,14 +474,16 @@ void startWifiBridge() {
 void parseCrsfFrame(const uint8_t *f,size_t n) {
   if(n<4)return; uint8_t type=f[2]; const uint8_t *p=f+3; size_t plen=n-4;
   if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.print("CH");for(int i=0;i<16;i++){Console.print(',');Console.print(channels[i]);}Console.println();}}
-  else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(int16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
+  else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(int16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];lastLinkStatMs=millis();Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
 }
-void pollCrsf(){while(CRSF.available()){uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
+void pollCrsf(){while(CRSF.available()){lastCrsfByteMs=millis();rxHeard=true;uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
 void setup(){Serial.begin(USB_BAUD);
 #if RANGELAB_WIFI
   CRSF.setRxBufferSize(1024);  // absorb a few dropped IRQs while WiFi transmits
 #endif
-  CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();if(logArmed){openLogFile();Console.println("STATUS,LOG_ARMED_FIELD_MODE");}
+  CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();
+  logBootEvent();
+  if(logArmed){openLogFile();Console.println("STATUS,LOG_ARMED_FIELD_MODE");}
 #if RANGELAB_WIFI
   startWifiBridge();
 #endif
@@ -357,6 +491,7 @@ void setup(){Serial.begin(USB_BAUD);
 void loop(){pollCrsf();while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
   bool failsafe=millis()-lastRcMs>RC_TIMEOUT_MS;if(failsafe&&!wasFailsafe){for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.println("STATUS,RC_FAILSAFE_OUTPUTS_NEUTRAL");}wasFailsafe=failsafe;
   if(logArmed&&millis()-lastLogMs>=LOG_PERIOD_MS){lastLogMs=millis();logSample();}
+  scanEvents();
 #if RANGELAB_WIFI
   webSocket.loop();
   serveHttpRequest();
