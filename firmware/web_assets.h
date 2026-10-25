@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 13313 bytes
+// 13329 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -171,7 +171,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <div><span>LINK</span><strong id="link">no frames yet</strong></div>
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
-      <div><span>5V RAIL</span><strong id="rail">not monitored</strong></div>
+      <div><span id="rail-label">5V RAIL</span><strong id="rail">not monitored</strong></div>
       <div><span>RX UART</span><strong id="wire">waiting</strong></div>
     </div>
     <div class="actions">
@@ -539,7 +539,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 14407 bytes
+// 14677 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -733,13 +733,18 @@ function render() {
   outputs.className = state.outputsEnabled ? 'on' : '';
 
   const railCell = el('rail');
+  const railLabel = el('rail-label');
   if (!state.rail) {
     railCell.textContent = 'not monitored';
     railCell.className = '';
+    railLabel.textContent = '5V RAIL';
   } else {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
     const lowMv = state.rail.lowMv ?? RAIL_LOW_MV;
-    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)} · dip < ${volts(lowMv)}`;
+    // The threshold goes in the label so neither line has to be truncated on a
+    // narrow phone: the value stays short, the limit is still on screen.
+    railLabel.textContent = `5V RAIL · DIP < ${volts(lowMv)}`;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
     railCell.className = state.rail.minMv < lowMv ? 'bad' : 'good';
   }
 
@@ -971,6 +976,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 39197;
+static constexpr size_t WEB_ASSETS_BYTES = 39483;
 
 #endif  // RANGELAB_WEB_ASSETS_H

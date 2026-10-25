@@ -191,13 +191,18 @@ function render() {
   outputs.className = state.outputsEnabled ? 'on' : '';
 
   const railCell = el('rail');
+  const railLabel = el('rail-label');
   if (!state.rail) {
     railCell.textContent = 'not monitored';
     railCell.className = '';
+    railLabel.textContent = '5V RAIL';
   } else {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
     const lowMv = state.rail.lowMv ?? RAIL_LOW_MV;
-    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)} · dip < ${volts(lowMv)}`;
+    // The threshold goes in the label so neither line has to be truncated on a
+    // narrow phone: the value stays short, the limit is still on screen.
+    railLabel.textContent = `5V RAIL · DIP < ${volts(lowMv)}`;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
     railCell.className = state.rail.minMv < lowMv ? 'bad' : 'good';
   }
 
