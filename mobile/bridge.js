@@ -35,6 +35,7 @@ export function createState() {
     outputsEnabled: false,
     controlsUnlocked: false,
     rail: null,
+    wire: null,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
     events: [],
     eventDraft: null,
@@ -166,6 +167,15 @@ export function applyLine(state, raw) {
     // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
     return { ...base, rail: { mv, minMv } };
+  }
+  // Receiver UART health: WIRE,<bad frames>,<sync errors>,<errors ignored because
+  // the ESP32 itself stalled>. All three only ever grow until the board restarts.
+  if (upper.startsWith('WIRE,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 3) return base;
+    const [bad, junk, ignored] = values;
+    if (![bad, junk, ignored].every(v => Number.isInteger(v) && v >= 0 && v < 1e9)) return base;
+    return { ...base, wire: { bad, junk, ignored } };
   }
   // The ESP32 keeps the last ~2.4 s of link statistics; TRACE replays it between
   // TRACE_BEGIN and TRACE_END so a loss can be read as a fade or a cliff.

@@ -39,6 +39,18 @@ test('mobile: parses link stats and device identity', () => {
   assert.equal(state.device, 'RangeLab-ESP32 1');
 });
 
+test('mobile: parses the receiver UART health counters', () => {
+  assert.equal(createState().wire, null);
+  let state = applyLine(createState(), 'WIRE,0,0,0');
+  assert.deepEqual(state.wire, { bad: 0, junk: 0, ignored: 0 });
+  state = applyLine(state, 'WIRE,12,3,2');
+  assert.deepEqual(state.wire, { bad: 12, junk: 3, ignored: 2 });
+  // A truncated or impossible line keeps the last good reading.
+  assert.deepEqual(applyLine(state, 'WIRE,12,3').wire, { bad: 12, junk: 3, ignored: 2 });
+  assert.deepEqual(applyLine(state, 'WIRE,-1,0,0').wire, { bad: 12, junk: 3, ignored: 2 });
+  assert.deepEqual(applyLine(state, 'WIRE,1.5,0,0').wire, { bad: 12, junk: 3, ignored: 2 });
+});
+
 test('mobile: applies CFG lines including the five curve points', () => {
   const state = applyLine(createState(), 'CFG,7,900,1100,CURVE,19,1000,2000,700,900,1500,1800,2300');
   const mapping = state.mappings[6];

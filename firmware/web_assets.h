@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 12868 bytes
+// 13080 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -172,6 +172,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
       <div><span>5V RAIL</span><strong id="rail">not monitored</strong></div>
+      <div><span>RX UART</span><strong id="wire">waiting</strong></div>
     </div>
     <div class="actions">
       <button class="grow" id="read-config" type="button">Read device config</button>
@@ -258,6 +259,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
       <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
       <strong>RX_GAP</strong> — the CRSF stream paused for 150 ms–1 s: an RX reset, not RF loss.
+      <strong>WIRE_NOISE</strong> — damaged frames on the receiver UART (bad CRC or lost sync): the cable, plug or ground, not the radio.
       <strong>PWR_DIP</strong> — the 5V rail dropped below the threshold (depth and duration recorded); needs the optional ADC tap.
       <strong>PWR_GLITCH</strong> — hardware-latched supply assertion, caught even mid-rub; needs the optional power-good input.
       <strong>BOOT</strong> — the ESP32 restarted (its reason is recorded: brownout, watchdog, power-on…).
@@ -280,7 +282,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 10737 bytes
+// 11261 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -318,6 +320,7 @@ export function createState() {
     outputsEnabled: false,
     controlsUnlocked: false,
     rail: null,
+    wire: null,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
     events: [],
     eventDraft: null,
@@ -450,6 +453,15 @@ export function applyLine(state, raw) {
     if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
     return { ...base, rail: { mv, minMv } };
   }
+  // Receiver UART health: WIRE,<bad frames>,<sync errors>,<errors ignored because
+  // the ESP32 itself stalled>. All three only ever grow until the board restarts.
+  if (upper.startsWith('WIRE,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 3) return base;
+    const [bad, junk, ignored] = values;
+    if (![bad, junk, ignored].every(v => Number.isInteger(v) && v >= 0 && v < 1e9)) return base;
+    return { ...base, wire: { bad, junk, ignored } };
+  }
   // The ESP32 keeps the last ~2.4 s of link statistics; TRACE replays it between
   // TRACE_BEGIN and TRACE_END so a loss can be read as a fade or a cliff.
   if (upper.startsWith('TRACE_BEGIN')) {
@@ -524,7 +536,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 13735 bytes
+// 14240 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -653,7 +665,7 @@ function buildChannelRows() {
   }
 }
 
-const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH']);
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH', 'WIRE_NOISE']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK', 'PWR_OK']);
 // Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
 const RAIL_LOW_MV = 4600;
@@ -724,6 +736,20 @@ function render() {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
     railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
     railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+  }
+
+  // Counters since the board booted, so a wiggle test shows them climbing here.
+  const wireCell = el('wire');
+  if (!state.wire) {
+    wireCell.textContent = 'waiting';
+    wireCell.className = '';
+  } else {
+    const { bad, junk, ignored } = state.wire;
+    const damaged = bad + junk;
+    wireCell.textContent = damaged === 0
+      ? (ignored ? `clean · ${ignored} ignored` : 'clean')
+      : `${bad} bad · ${junk} sync`;
+    wireCell.className = damaged === 0 ? 'good' : 'bad';
   }
 
   const rows = el('channels').children;
@@ -940,6 +966,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 37340;
+static constexpr size_t WEB_ASSETS_BYTES = 38581;
 
 #endif  // RANGELAB_WEB_ASSETS_H

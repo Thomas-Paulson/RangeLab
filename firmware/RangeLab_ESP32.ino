@@ -22,6 +22,12 @@
   edge is latched by hardware and counted by an ISR as PWR_GLITCH, whenever it
   happens. BOOT also records the reset reason, so a brownout reset is named.
 
+  A noisy receiver UART is logged too: the CRSF frames carry a CRC, and the wire
+  between the receiver and the ESP32 is not radio, so a frame that fails its CRC
+  blames the cable, connector or ground rather than interference. WIRE_NOISE
+  events and the live WIRE line count those, which is what a rubbing connector
+  shows up as.
+
   Safety: outputs are DISABLED on boot and after 500 ms without valid RC frames.
           Over WiFi, outputs and mapping writes stay locked until the app sends
           UNLOCK; DISABLE is always accepted.
@@ -31,6 +37,8 @@
             EVENTS[,CLEAR] (short link/receiver trouble log, also in internal flash),
             TRACE (the last ~2.4 s of link statistics: both antennas, LQ, SNR, RF
             mode and TX power, sampled every 100 ms).
+            Once a second it also prints WIRE,<bad frames>,<junk bytes>,<ignored>:
+            receiver-cable health for a wiggle test (see WIRE_NOISE below).
   Modes: OFF, SERVO (microseconds), PWM (0..255), DIGITAL (threshold at midpoint),
          WINDOW (output high inside outLow..outHigh band), CURVE (5-point servo curve).
   Never connect motors/servos directly to GPIO if their current exceeds GPIO capability.
@@ -100,6 +108,13 @@ static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
 // Rail monitor and short-gap detector (the rail macros live at the top).
 static constexpr uint32_t RAIL_REPORT_MS = 1000;   // live RAIL line cadence
 static constexpr uint32_t RX_GAP_MS = 150;         // CRSF stream pause worth recording
+// Receiver UART health. A CRSF frame carries a CRC over its type, payload and
+// length, and the wire from the receiver to the ESP32 is not radio: bytes cannot
+// be corrupted in flight by interference. A frame that fails its CRC was damaged
+// on the cable, in the connector, or by a shared ground that is not solid.
+static constexpr uint32_t WIRE_REPORT_MS = 1000;      // live WIRE line cadence
+static constexpr uint32_t WIRE_BURST_CLOSE_MS = 1000; // quiet time that ends one noise burst
+static constexpr uint32_t WIRE_STALL_MS = 20;         // loop gap long enough to drop UART bytes itself
 
 static constexpr int CRSF_RX_PIN = 16;
 static constexpr uint32_t USB_BAUD = 115200;
@@ -144,6 +159,15 @@ uint16_t bootCount=0;
 int railMv=-1, railMinMv=-1, railDipMinMv=0;
 bool railLow=false; uint32_t railLowSinceMs=0, lastRailReportMs=0;
 uint32_t pendingGapMs=0; uint32_t lastLoopMs=0, lastIterationMs=0;
+// Receiver UART health counters. wireCrcErrors are frames whose CRC did not
+// match; wireJunkBytes are bytes that could not start or continue a frame (the
+// stream lost sync). wireStallErrors are errors seen on a pass that followed a
+// long loop stall, where the ESP32's own buffer overflow can drop bytes: those
+// are excused rather than blamed on the cable. wireSynced stays false until the
+// first CRC-valid frame, so the partial frame caught at boot is not a fault.
+uint32_t wireCrcErrors=0, wireJunkBytes=0, wireStallErrors=0;
+uint32_t wireBurstCrc=0, wireBurstJunk=0, wireBurstStartMs=0, wireLastErrorMs=0, lastWireReportMs=0;
+bool wireSynced=false; bool wireBurstOpen=false;
 
 // The console printer and its WebSocket capture live below the type
 // declarations on purpose: arduino-cli injects auto-generated prototypes just
@@ -254,6 +278,12 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //                 assertion of the supervisor output, counted even if the loop was
 //                 busy. This is the event that catches a sub-millisecond rub.
 //   PWR_OK        the power-good line came back high, with how long it was low.
+//   WIRE_NOISE    a burst of damaged frames on the receiver UART: CRC failures,
+//                 bytes that broke frame sync, or both. Radio interference cannot
+//                 corrupt this wire, so a burst points at the cable, the connector
+//                 or the ground between receiver and ESP32. A burst is logged once
+//                 when it goes quiet, with the counts, so a rubbing plug reads as
+//                 one entry rather than hundreds.
 //   BOOT          ESP32 start-up, numbered and with its reset reason (brownout,
 //                 panic, watchdog, power-on...): a growing count means resets.
 // ---------------------------------------------------------------------------
@@ -305,6 +335,14 @@ String railNote() {
   if(railMv < 0) return String();
   return String("; rail ") + railMv + " mV";
 }
+// Appended to gap/silence details: UART damage around the same moment. A stream
+// pause with damaged frames either side is a wire opening and closing; a pause
+// with a clean stream either side is the receiver itself going away.
+String wireNote() {
+  const uint32_t bad = wireBurstCrc + wireBurstJunk;
+  if(!bad) return String();
+  return String("; ") + (unsigned long)bad + " UART error(s) around it";
+}
 void railInit() { railMv = readRailMv(); railMinMv = railMv; lastRailReportMs = millis(); }
 // One rail sample. Called as often as the main loop allows; a dip is logged when
 // it recovers so the entry can carry its depth and length. A dip that kills the
@@ -340,16 +378,60 @@ void pollRail() {
 // loop stalls (HTTP serving, flash writes, WiFi bursts) and must not be logged.
 void noteCrsfByte(const uint32_t now) {
   const uint32_t gap = now - lastCrsfByteMs;
-  if(rxHeard && gap >= RX_GAP_MS && gap <= RX_SILENT_MS && gap > lastIterationMs + 100) pendingGapMs = gap;
+  if(rxHeard && gap >= RX_GAP_MS && gap <= RX_SILENT_MS && gap > lastIterationMs + 100) {
+    pendingGapMs = gap;
+    // The stream restarted, so it will resume mid-frame. Whatever arrives before
+    // the next CRC-valid frame says nothing about the cable, and the damage from
+    // before the pause is already counted in the open burst.
+    wireSynced = false;
+  }
   lastCrsfByteMs = now;
   rxHeard = true;
 }
 void flushGapEvent() {
   if(!pendingGapMs) return;
-  char detail[120];
-  snprintf(detail, sizeof(detail), "CRSF stream paused for %lums%s", (unsigned long)pendingGapMs, railNote().c_str());
+  char detail[160];
+  snprintf(detail, sizeof(detail), "CRSF stream paused for %lums%s%s",
+           (unsigned long)pendingGapMs, wireNote().c_str(), railNote().c_str());
   pendingGapMs = 0;
   eventAppend("RX_GAP", detail);
+}
+// ---- receiver UART health: what the cable looks like -------------------------
+// Called for every byte that does not belong to a CRC-valid frame. A stalled
+// pass is counted apart, because a loop blocked longer than the 1024-byte UART
+// buffer (about 24 ms at 420000 baud) can drop bytes on its own.
+void noteWireError(const bool stalled, const bool crc) {
+  if(!wireSynced) return;  // still waiting for the first good frame after boot or an RX reset
+  if(crc) wireCrcErrors++; else wireJunkBytes++;
+  if(stalled) { wireStallErrors++; return; }
+  const uint32_t now = millis();
+  if(!wireBurstOpen) {
+    wireBurstOpen = true;
+    wireBurstStartMs = now;
+    wireBurstCrc = 0;
+    wireBurstJunk = 0;
+  }
+  wireLastErrorMs = now;
+  if(crc) wireBurstCrc++; else wireBurstJunk++;
+}
+void pollWire() {
+  const uint32_t now = millis();
+  if(wireBurstOpen && (uint32_t)(now - wireLastErrorMs) >= WIRE_BURST_CLOSE_MS) {
+    wireBurstOpen = false;
+    const uint32_t span = wireLastErrorMs - wireBurstStartMs + 1;
+    char detail[200];
+    snprintf(detail, sizeof(detail),
+             "%lu bad frame(s) and %lu sync error(s) in %lums on the receiver UART%s%s",
+             (unsigned long)wireBurstCrc, (unsigned long)wireBurstJunk, (unsigned long)span,
+             wireStallErrors ? "; loop stalls may have dropped bytes too" : "",
+             railNote().c_str());
+    eventAppend("WIRE_NOISE", detail);
+  }
+  if(now - lastWireReportMs >= WIRE_REPORT_MS) {
+    lastWireReportMs = now;
+    Console.printf("WIRE,%lu,%lu,%lu\n", (unsigned long)wireCrcErrors,
+                   (unsigned long)wireJunkBytes, (unsigned long)wireStallErrors);
+  }
 }
 // ---- link trace: what the receiver itself reported before a loss ----------
 // ELRS sends both antenna RSSIs, the active antenna, RF mode, transmitter power
@@ -485,9 +567,13 @@ void scanEvents() {
   if(silentNow != rxSilent) {
     rxSilent = silentNow;
     if(rxSilent) {
-      char detail[120];
-      snprintf(detail, sizeof(detail), "no CRSF bytes for %lums; last rssi %d dBm lq %u snr %d%s",
-               (unsigned long)RX_SILENT_MS, (int)linkRssi, (unsigned)linkLq, (int)linkSnr, railNote().c_str());
+      // The stream will resume mid-frame: wait for the first CRC-valid frame
+      // before blaming the resync bytes on the cable.
+      wireSynced = false;
+      char detail[180];
+      snprintf(detail, sizeof(detail), "no CRSF bytes for %lums; last rssi %d dBm lq %u snr %d%s%s",
+               (unsigned long)RX_SILENT_MS, (int)linkRssi, (unsigned)linkLq, (int)linkSnr,
+               wireNote().c_str(), railNote().c_str());
       eventAppend("RX_SILENT", detail);
     } else {
       eventAppend("RX_ACTIVE", "receiver is transmitting again");
@@ -741,13 +827,38 @@ void parseCrsfFrame(const uint8_t *f,size_t n) {
     Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);
   }
 }
-void pollCrsf(){while(CRSF.available()){noteCrsfByte(millis());uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
+// One UART pass. Bytes are dropped for exactly two reasons and both are counted as
+// wire evidence: a stray byte while hunting for a frame header (sync lost), and a
+// complete frame whose CRC does not match. A CRC-valid frame proves the wire was
+// clean at that instant, which is what separates a damaged cable from radio loss.
+void pollCrsf() {
+  const bool stalled = lastIterationMs > WIRE_STALL_MS;
+  while (CRSF.available()) {
+    noteCrsfByte(millis());
+    const uint8_t b = CRSF.read();
+    if (frameLen == 0) {
+      if (b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00) frame[frameLen++] = b;
+      else noteWireError(stalled, false);
+      continue;
+    }
+    if (frameLen >= sizeof(frame)) { frameLen = 0; noteWireError(stalled, false); continue; }
+    frame[frameLen++] = b;
+    if (frameLen == 2 && (frame[1] < 2 || frame[1] > 64)) { frameLen = 0; noteWireError(stalled, false); continue; }
+    if (frameLen == (size_t)frame[1] + 2) {
+      const size_t n = frameLen;
+      frameLen = 0;
+      if (crsfCrc(frame + 2, n - 3) == frame[n - 1]) { wireSynced = true; parseCrsfFrame(frame, n); }
+      else noteWireError(stalled, true);
+    }
+  }
+}
 void setup(){Serial.begin(USB_BAUD);
 #if RANGELAB_WIFI
   CRSF.setRxBufferSize(1024);  // absorb a few dropped IRQs while WiFi transmits
 #endif
   CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();
   railInit();
+  lastWireReportMs = millis();
 #if RANGELAB_PWRGOOD_PIN >= 0
   pinMode(RANGELAB_PWRGOOD_PIN, INPUT);  // input-only pins have no internal pull-up
   attachInterrupt(digitalPinToInterrupt(RANGELAB_PWRGOOD_PIN), onPwrGoodEdge, CHANGE);
@@ -758,7 +869,7 @@ void setup(){Serial.begin(USB_BAUD);
   startWifiBridge();
 #endif
   Console.println("READY,RangeLab-ESP32,1");Console.println("STATUS,OUTPUTS_DISABLED_ON_BOOT");}
-void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollPwrGood();pollCrsf();flushGapEvent();
+void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollPwrGood();pollCrsf();pollWire();flushGapEvent();
   while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
   bool failsafe=millis()-lastRcMs>RC_TIMEOUT_MS;if(failsafe&&!wasFailsafe){for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.println("STATUS,RC_FAILSAFE_OUTPUTS_NEUTRAL");}wasFailsafe=failsafe;
   if(logArmed&&millis()-lastLogMs>=LOG_PERIOD_MS){lastLogMs=millis();logSample();}

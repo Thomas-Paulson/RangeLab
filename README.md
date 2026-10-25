@@ -77,7 +77,13 @@ restart), and can clear it once unlocked. Add a 10k/10k divider from the 5V/VIN 
 to GPIO34 and set `RANGELAB_RAIL_ADC` to 34 to record actual **supply dips** (`PWR_DIP`) and
 show the live VIN voltage on the page. A supply supervisor or comparator on a GPIO
 (`RANGELAB_PWRGOOD_PIN`) latches dips too short to sample, and `BOOT` records the last reset
-reason so a brownout reset is named rather than guessed. Field-log download stays on USB. Full setup, safety
+reason so a brownout reset is named rather than guessed.
+
+The page also shows **RX UART** health, which is how a bad cable is told apart from a bad
+supply: CRSF frames are CRC-checked, and radio interference cannot damage the bytes on the
+wire, so damaged frames mean the plug, cable or ground between receiver and ESP32
+(`WIRE_NOISE` events, plus a live `WIRE,<bad>,<sync>,<ignored>` line over USB). Wiggle a
+joint and watch the counters climb. Field-log download stays on USB. Full setup, safety
 model and limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.

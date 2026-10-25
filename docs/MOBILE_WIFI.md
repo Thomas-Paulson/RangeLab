@@ -67,6 +67,8 @@ Nothing here needs a router or a cellular signal. The ESP32 is the network.
   and, if the optional rail tap is wired, the live 5V rail voltage and its lowest reading.
 - Load the last ~2.4 s of link statistics (`TRACE`) to see how a link was lost: both antenna
   RSSIs, LQ, SNR, antenna, RF mode, TX power and downlink quality.
+- Watch the receiver UART's error counters live (**RX UART**), which is what a cable or
+  connector fault shows up as. No extra wiring needed — the CRSF frames carry a CRC.
 
 It deliberately does **not** do field-log download — a full dump is ~1.8 MB of ASCII, which
 is too much for the bridge and it would stall the RC loop for seconds. `LOG DUMP` is
@@ -93,6 +95,7 @@ phone alone. The page loads the log when it connects; **Load events** re-reads i
 | `PWR_DIP` | Only with the optional rail tap below: the 5V rail fell below the threshold and recovered. Carries the lowest voltage and how long it stayed low. |
 | `PWR_GLITCH` | Only with the optional power-good input below: a hardware-latched assertion of the supply supervisor, counted even when the loop was busy. This is what catches a rub shorter than one ADC sample. |
 | `PWR_OK` | The power-good line came back high, with how long it had been low. |
+| `WIRE_NOISE` | A burst of damaged frames on the receiver UART — bad CRCs, bytes that broke frame sync, or both. Radio cannot corrupt this wire, so it points at the cable, plug or ground. Logged once when the burst goes quiet, with the counts and span. |
 
 Lines look like `EVENT,<uptime ms>,<code>,<detail>`, for example
 `EVENT,184312,RX_SILENT,no CRSF bytes for 1000ms; last rssi -88 dBm lq 0 snr 1`.
@@ -111,6 +114,15 @@ ground, or its TX wire all remove the signal, and the ESP32 cannot distinguish t
   (usually with `RC_LOST`), with no `RX_SILENT` before it.
 - **Receiver stopped transmitting** — all bytes stop, so you get `RX_SILENT` and no
   `RF_LINK_LOST` immediately before it.
+
+A third case is now separable inside that second one: a **scratchy connection**. The CRSF
+frames arriving on GPIO16 are CRC-checked, and nothing in the air can corrupt them — the
+radio decodes and re-frames before the UART, so the wire carries clean digital bytes or
+nothing. Damaged frames therefore mean the wire itself: a plug half out, a crimp that only
+makes contact at some angles, a ground that is shared through a loose joint. `RX_SILENT` and
+`RX_GAP` details now carry how many UART errors came with the pause (`4 UART error(s)
+around it`), which is the difference between a wire opening and a receiver that simply ran
+out of power.
 
 If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the moment it
 happens; the `BOOT` counter increments when it comes back and now names the reset reason, so
@@ -257,6 +269,66 @@ What it cannot do: everything here is reported by the receiver. It cannot identi
 interferer, prove the transmitter's antenna or PA is healthy, and records nothing at all if
 the receiver stops talking (`RX_SILENT` has no statistics to show).
 
+## Is it the cable? (receiver UART health)
+
+Every CRSF frame carries a CRC over its type, payload and length, and the ESP32 checks it on
+arrival. The radio link is decoded by the receiver and re-sent as UART bytes, so nothing in
+the air can corrupt them: a failed CRC means the byte was damaged on the wire between the
+receiver's TX pin and GPIO16 — cable, plug, solder joint, or the ground return between the
+two boards. That is the one direct measurement of the cable the ESP32 can make, and it needs
+no extra parts.
+
+The page shows it as **RX UART**; the same numbers stream over USB once a second:
+
+```
+WIRE,<bad frames>,<sync errors>,<ignored after loop stalls>
+```
+
+- **bad frames** — a complete frame whose CRC did not match. The sharpest cable evidence.
+- **sync errors** — bytes that could not begin or continue a frame (the stream lost its
+  place). Usually a run right after a bad frame.
+- **ignored** — errors seen right after a loop pass that took longer than ~20 ms. The
+  firmware's own 1 KB UART buffer is only about 24 ms of 420000-baud traffic, so a WiFi burst
+  or a flash write can drop bytes itself. Those are counted apart so they are not blamed on
+  the wiring.
+
+A burst of errors is written to the event log as `WIRE_NOISE` once it has been quiet for a
+second, with counts and span, so a rubbing plug is one entry rather than hundreds:
+
+```
+EVENT,91240,WIRE_NOISE,7 bad frame(s) and 2 sync error(s) in 43ms on the receiver UART; rail 4700 mV
+```
+
+### The wiggle test
+
+1. Open the page (or a USB serial monitor) with the link up. **RX UART** should read `clean`.
+2. Flex each suspect gently, one at a time: the receiver's TX wire, its ground, the plug at
+   the receiver end, the plug at the ESP32 end.
+3. Watch the counters. When they climb, that joint is the fault — a number instead of a guess.
+
+Reading the result:
+
+- **Errors climb with the rail steady** — the supply is fine, the signal or ground path is not.
+- **Errors and `RX_SILENT` together** — the connection is opening outright.
+- **`RX_SILENT` / `RX_GAP` with zero UART errors** — the wire is intact but nothing is being
+  sent: receiver power, a receiver reset, or a dead TX driver.
+- **No UART errors while the radio link drops** — the fault is in the air, not on the bench.
+
+What it cannot do:
+
+- It cannot say which end of the cable is at fault, only that bytes were damaged between the
+  receiver's output and the ESP32's pin. Swapping the cable separates a bad wire from a
+  marginal UART driver or a floating TX line inside the receiver.
+- Frames are counted, never stored, and the counters reset on every ESP32 boot (`BOOT` marks
+  where).
+- After a stream pause the firmware has to find the frame boundary again; those re-sync bytes
+  are ignored, because the pause may have been the receiver resetting rather than the wire.
+  The damage from *before* the pause is still counted and still appears in the `RX_GAP` detail.
+- Bytes dropped while the ESP32 was stalled land in the third column, so a real fault that
+  happened during a long stall can be excused rather than counted.
+- It says nothing about the transmitter side: damage there shows up as an RF problem in
+  `TRACE`, not as UART errors.
+
 ## Safety model
 
 - Outputs are still disabled on boot and after 500 ms without valid RC frames.
@@ -283,6 +355,9 @@ the receiver stops talking (`RX_SILENT` has no statistics to show).
 - The event log is inferred from the CRSF stream, not measured at the receiver's supply:
   an unpowered receiver and an open TX wire both read as `RX_SILENT`. Event timestamps are
   board uptime and reset on every boot.
+- UART error counters describe the wire to the receiver only. Bytes dropped because the ESP32
+  itself stalled (WiFi bursts, flash writes) are counted separately and are not cable evidence,
+  and a receiver with a marginal UART driver looks the same as a bad cable.
 - Direct rail measurement needs the optional ADC tap; without it a millisecond supply dip is
   invisible unless it interrupts the CRSF stream (`RX_GAP` / `RX_SILENT`). With it, dips
   shorter than one loop pass — WiFi bursts, flash writes, HTTP serving — can still be missed.

@@ -163,6 +163,7 @@
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
       <div><span>5V RAIL</span><strong id="rail">not monitored</strong></div>
+      <div><span>RX UART</span><strong id="wire">waiting</strong></div>
     </div>
     <div class="actions">
       <button class="grow" id="read-config" type="button">Read device config</button>
@@ -249,6 +250,7 @@
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
       <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
       <strong>RX_GAP</strong> — the CRSF stream paused for 150 ms–1 s: an RX reset, not RF loss.
+      <strong>WIRE_NOISE</strong> — damaged frames on the receiver UART (bad CRC or lost sync): the cable, plug or ground, not the radio.
       <strong>PWR_DIP</strong> — the 5V rail dropped below the threshold (depth and duration recorded); needs the optional ADC tap.
       <strong>PWR_GLITCH</strong> — hardware-latched supply assertion, caught even mid-rub; needs the optional power-good input.
       <strong>BOOT</strong> — the ESP32 restarted (its reason is recorded: brownout, watchdog, power-on…).

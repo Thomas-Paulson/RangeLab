@@ -126,7 +126,7 @@ function buildChannelRows() {
   }
 }
 
-const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH']);
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP', 'PWR_GLITCH', 'WIRE_NOISE']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK', 'PWR_OK']);
 // Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
 const RAIL_LOW_MV = 4600;
@@ -197,6 +197,20 @@ function render() {
     const volts = (value) => `${(value / 1000).toFixed(2)} V`;
     railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
     railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+  }
+
+  // Counters since the board booted, so a wiggle test shows them climbing here.
+  const wireCell = el('wire');
+  if (!state.wire) {
+    wireCell.textContent = 'waiting';
+    wireCell.className = '';
+  } else {
+    const { bad, junk, ignored } = state.wire;
+    const damaged = bad + junk;
+    wireCell.textContent = damaged === 0
+      ? (ignored ? `clean · ${ignored} ignored` : 'clean')
+      : `${bad} bad · ${junk} sync`;
+    wireCell.className = damaged === 0 ? 'good' : 'bad';
   }
 
   const rows = el('channels').children;
