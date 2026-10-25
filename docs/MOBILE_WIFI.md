@@ -63,7 +63,8 @@ Nothing here needs a router or a cellular signal. The ESP32 is the network.
 - Per-channel mapping editor: input min/max, mode (`OFF`, `SERVO`, `PWM`, `DIGITAL`,
   `WINDOW`, `CURVE`), GPIO, output range and the five curve points.
 - Enable and disable GPIO outputs.
-- Read (and, once unlocked, clear) the link/receiver event log kept in the ESP32's flash.
+- Read (and, once unlocked, clear) the link/receiver event log kept in the ESP32's flash,
+  and, if the optional rail tap is wired, the live 5V rail voltage and its lowest reading.
 
 It deliberately does **not** do field-log download — a full dump is ~1.8 MB of ASCII, which
 is too much for the bridge and it would stall the RC loop for seconds. `LOG DUMP` is
@@ -86,6 +87,8 @@ phone alone. The page loads the log when it connects; **Load events** re-reads i
 | `RF_LINK_OK` | Link quality is back. |
 | `RC_LOST` | Channel frames stopped while the receiver kept transmitting. |
 | `RC_OK` | Channel frames returned. |
+| `RX_GAP` | The CRSF stream paused for 250 ms–1 s, then resumed. An RX reset (typically a brownout) looks like this; RF loss does not, because the receiver keeps transmitting. |
+| `PWR_DIP` | Only with the optional rail tap below: the 5V rail fell below the threshold and recovered. Carries the lowest voltage and how long it stayed low. |
 
 Lines look like `EVENT,<uptime ms>,<code>,<detail>`, for example
 `EVENT,184312,RX_SILENT,no CRSF bytes for 1000ms; last rssi -88 dBm lq 0 snr 1`.
@@ -108,6 +111,50 @@ ground, or its TX wire all remove the signal, and the ESP32 cannot distinguish t
 If the whole assembly (ESP32 and receiver) loses power, the ESP32 cannot log the moment it
 happens; the `BOOT` counter increments when it comes back. That is how an ESP32-side reset
 or brownout is told apart from a receiver-side dropout.
+
+## 5V rail monitor (optional, for supply troubleshooting)
+
+Without a wire to the rail, the ESP32 can only *infer* a supply problem from CRSF silence.
+To see the rail itself, add one wire and two resistors at the receiver's 5V pin:
+
+```
+receiver 5V ──[10k]──┬── GPIO34 (ADC1)
+                     │
+                   [10k]
+                     │
+                    GND
+```
+
+Then set `#define RANGELAB_RAIL_ADC 34` near the top of the sketch. Only ADC1 pins work
+while WiFi is on (32, 33, 34, 35, 36, 39); 34/35/36/39 are input-only, which is what this
+wants. Never connect 5V straight to a GPIO — it is a 3.3 V pin. Measure at the load (the
+receiver's 5V pin), not at the BEC output, and keep the grounds common.
+
+Once enabled:
+
+- The rail is sampled as often as the main loop allows and printed once a second as
+  `RAIL,<mV>,<lowest mV since boot>`; the page shows it as **5V RAIL** (green, or red if it
+  has ever been low).
+- `PWR_DIP` is recorded when the rail falls below `RAIL_LOW_MV` (4600 mV) and recovers above
+  `RAIL_OK_MV` (4750 mV), with the lowest voltage and the time spent low.
+- `RX_SILENT`, `RX_GAP` and `BOOT` details carry the rail voltage at that moment.
+
+That separates the two cases you care about: `RX_SILENT` with `rail 4400 mV` is a supply
+problem, while `RX_SILENT` with `rail 5000 mV` points at the receiver or its wiring, and
+`RF_LINK_LOST` with a steady rail is RF, not power. Both thresholds are constants at the top
+of the sketch if your rail idles lower than 4.75 V.
+
+What this cannot promise:
+
+- Sampling is roughly 1–2 kHz while the loop is free, so a 1 ms dip is recorded only if a
+  sample lands inside it and WiFi/flash work is not blocking the loop. Guaranteed capture of
+  sub-millisecond events needs a hardware power-good supervisor wired to a GPIO interrupt,
+  which this firmware does not implement.
+- The ESP32 ADC is referenced to its own 3.3 V rail and is accurate to roughly ±20–30 mV; if
+  that rail sags too, the converted values shift with it.
+- If a dip is deep enough to reset the ESP32, no `PWR_DIP` is written — the board is
+  rebooting. The next `BOOT` entry increments and its detail shows the rail at start-up,
+  which is how that case shows up.
 
 A receiver that boots with no transmitter powered reports 0% LQ until its first packet;
 the firmware only reports `RF_LINK_LOST` after it has seen a real link, so cold boots do
@@ -139,6 +186,9 @@ not fill the log with noise.
 - The event log is inferred from the CRSF stream, not measured at the receiver's supply:
   an unpowered receiver and an open TX wire both read as `RX_SILENT`. Event timestamps are
   board uptime and reset on every boot.
+- Direct rail measurement needs the optional ADC tap; without it a millisecond supply dip is
+  invisible unless it interrupts the CRSF stream (`RX_GAP` / `RX_SILENT`). With it, dips
+  shorter than one loop pass — WiFi bursts, flash writes, HTTP serving — can still be missed.
 
 ## USB-only build
 

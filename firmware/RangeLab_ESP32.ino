@@ -11,6 +11,12 @@
       WebSocket, so an iPhone or Android phone needs no app and no cable.
       Set RANGELAB_WIFI to 0 below for the original USB-only build.
 
+  Optional 5V rail monitor: wire the rail through a 1:1 divider into an ADC1 pin
+  (5V --[10k]-- GPIO34 --[10k]-- GND) and set RANGELAB_RAIL_ADC to 34 below. The
+  firmware then logs PWR_DIP with the lowest voltage and its duration, and prints
+  RAIL,<mV>,<min mV> once a second. Without that wire the ESP32 cannot see the
+  5V rail at all: receiver silence only proves the CRSF stream stopped, not why.
+
   Safety: outputs are DISABLED on boot and after 500 ms without valid RC frames.
           Over WiFi, outputs and mapping writes stay locked until the app sends
           UNLOCK; DISABLE is always accepted.
@@ -30,6 +36,15 @@
 // Transports
 // ---------------------------------------------------------------------------
 #define RANGELAB_WIFI 1  // 0 = USB-only build (no WiFi, no WebSockets library needed)
+
+// Optional 5V rail monitor. The ESP32 cannot see the 5V rail unless it is wired
+// to an ADC input, so this stays off until you add a 1:1 divider and set the pin:
+//   5V rail --[10k]--+--[10k]-- GND
+//                    |
+//                 GPIO34 (ADC1, input-only)
+// ADC1 pins only (32, 33, 34, 35, 36, 39); ADC2 does not work while WiFi is on.
+// Do not feed 5V straight into a GPIO: it is a 3.3V pin.
+#define RANGELAB_RAIL_ADC -1
 
 #if RANGELAB_WIFI
 #include <WiFi.h>
@@ -52,6 +67,13 @@ static constexpr const char* EVENT_PATH = "/events.log";
 static constexpr size_t EVENT_FILE_MAX = 6000;   // ~150 entries before the oldest half is dropped
 static constexpr uint32_t RX_SILENT_MS = 1000;   // no CRSF bytes at all for this long
 static constexpr uint32_t EVENT_SCAN_MS = 100;   // event state machine cadence
+
+// Rail monitor and short-gap detector (rail constants only apply when wired).
+static constexpr int RAIL_ADC_MULTIPLIER = 2;      // the 1:1 divider halves the measured rail
+static constexpr int RAIL_LOW_MV = 4600;           // a sample below this starts a dip
+static constexpr int RAIL_OK_MV = 4750;            // hysteresis: back above this ends it
+static constexpr uint32_t RAIL_REPORT_MS = 1000;   // live RAIL line cadence
+static constexpr uint32_t RX_GAP_MS = 250;         // CRSF stream pause worth recording
 
 static constexpr int CRSF_RX_PIN = 16;
 static constexpr uint32_t USB_BAUD = 115200;
@@ -78,6 +100,10 @@ bool logArmed=false; File logFile; uint32_t lastLogMs=0; int16_t linkRssi=0; uin
 uint32_t lastCrsfByteMs=0; uint32_t lastLinkStatMs=0; uint32_t lastEventScanMs=0;
 bool rxSilent=true; bool rcLost=false; bool rfLinkLost=false; bool sawLinkQuality=false; bool rxHeard=false;
 uint16_t bootCount=0;
+// 5V rail monitor and short-gap detector.
+int railMv=-1, railMinMv=-1, railDipMinMv=0;
+bool railLow=false; uint32_t railLowSinceMs=0, lastRailReportMs=0;
+uint32_t pendingGapMs=0; uint32_t lastLoopMs=0, lastIterationMs=0;
 
 // The console printer and its WebSocket capture live below the type
 // declarations on purpose: arduino-cli injects auto-generated prototypes just
@@ -174,6 +200,13 @@ void loadLogArm(){ prefs.begin("rangelab",true); logArmed=prefs.getBool("logArm"
 //   RF_LINK_OK    link quality is back.
 //   RC_LOST       channel frames stopped while the receiver keeps transmitting.
 //   RC_OK         channel frames are back.
+//   RX_GAP        the CRSF stream paused for 250 ms-1 s, then resumed: short
+//                 enough that RX_SILENT does not fire, but an RX reset (usually a
+//                 brownout) looks exactly like this.
+//   PWR_DIP       only when RANGELAB_RAIL_ADC is wired: the 5V rail fell below
+//                 RAIL_LOW_MV and recovered. Carries the lowest measured voltage
+//                 and how long it stayed low, so a supply problem is provable
+//                 rather than inferred from CRSF silence.
 //   BOOT          ESP32 start-up, numbered: a growing count means resets.
 // ---------------------------------------------------------------------------
 void compactEventLog() {
@@ -212,13 +245,71 @@ void dumpEventLog() {
   }
   Console.println("EVENT_END");
 }
+int readRailMv() {
+#if RANGELAB_RAIL_ADC >= 0
+  return (int)analogReadMilliVolts(RANGELAB_RAIL_ADC) * RAIL_ADC_MULTIPLIER;
+#else
+  return -1;
+#endif
+}
+// Appended to event details so a fault can be read next to the rail voltage.
+String railNote() {
+  if(railMv < 0) return String();
+  return String("; rail ") + railMv + " mV";
+}
+void railInit() { railMv = readRailMv(); railMinMv = railMv; lastRailReportMs = millis(); }
+// One rail sample. Called as often as the main loop allows; a dip is logged when
+// it recovers so the entry can carry its depth and length. A dip that kills the
+// ESP32 itself is not logged here - the BOOT counter is what shows that.
+void pollRail() {
+#if RANGELAB_RAIL_ADC >= 0
+  const uint32_t now = millis();
+  const int mv = readRailMv();
+  railMv = mv;
+  if(railMinMv < 0 || mv < railMinMv) railMinMv = mv;
+  if(!railLow && mv < RAIL_LOW_MV) {
+    railLow = true;
+    railLowSinceMs = now;
+    railDipMinMv = mv;
+  } else if(railLow) {
+    if(mv < railDipMinMv) railDipMinMv = mv;
+    if(mv >= RAIL_OK_MV) {
+      railLow = false;
+      char detail[120];
+      snprintf(detail, sizeof(detail), "5V rail dipped to %d mV for %lums (below %d mV)",
+               railDipMinMv, (unsigned long)(now - railLowSinceMs), RAIL_LOW_MV);
+      eventAppend("PWR_DIP", detail);
+    }
+  }
+  if(now - lastRailReportMs >= RAIL_REPORT_MS) {
+    lastRailReportMs = now;
+    Console.printf("RAIL,%d,%d\n", railMv, railMinMv);
+  }
+#endif
+}
+// Records one byte arrival. Called for every CRSF byte; a pause longer than the
+// previous loop pass plus 100 ms is a real stream stop, while shorter ones are
+// loop stalls (HTTP serving, flash writes, WiFi bursts) and must not be logged.
+void noteCrsfByte(const uint32_t now) {
+  const uint32_t gap = now - lastCrsfByteMs;
+  if(rxHeard && gap >= RX_GAP_MS && gap <= RX_SILENT_MS && gap > lastIterationMs + 100) pendingGapMs = gap;
+  lastCrsfByteMs = now;
+  rxHeard = true;
+}
+void flushGapEvent() {
+  if(!pendingGapMs) return;
+  char detail[120];
+  snprintf(detail, sizeof(detail), "CRSF stream paused for %lums%s", (unsigned long)pendingGapMs, railNote().c_str());
+  pendingGapMs = 0;
+  eventAppend("RX_GAP", detail);
+}
 void logBootEvent() {
   prefs.begin("rangelab", false);
   bootCount = prefs.getUShort("boots", 0) + 1;
   prefs.putUShort("boots", bootCount);
   prefs.end();
-  char detail[48];
-  snprintf(detail, sizeof(detail), "esp32 boot #%u", (unsigned)bootCount);
+  char detail[64];
+  snprintf(detail, sizeof(detail), "esp32 boot #%u%s", (unsigned)bootCount, railNote().c_str());
   eventAppend("BOOT", detail);
 }
 void scanEvents() {
@@ -232,8 +323,8 @@ void scanEvents() {
     rxSilent = silentNow;
     if(rxSilent) {
       char detail[120];
-      snprintf(detail, sizeof(detail), "no CRSF bytes for %lums; last rssi %d dBm lq %u snr %d",
-               (unsigned long)RX_SILENT_MS, (int)linkRssi, (unsigned)linkLq, (int)linkSnr);
+      snprintf(detail, sizeof(detail), "no CRSF bytes for %lums; last rssi %d dBm lq %u snr %d%s",
+               (unsigned long)RX_SILENT_MS, (int)linkRssi, (unsigned)linkLq, (int)linkSnr, railNote().c_str());
       eventAppend("RX_SILENT", detail);
     } else {
       eventAppend("RX_ACTIVE", "receiver is transmitting again");
@@ -434,7 +525,7 @@ void serveHttpRequest() {
   String requestLine;
   const uint32_t started = millis();
   while(client.connected() && millis()-started < 250) {
-    if(!client.available()) { delay(1); continue; }
+    if(!client.available()) { pollRail(); delay(1); continue; }
     const int c = client.read();
     if(c<0) break;
     if(c=='\n') break;
@@ -476,19 +567,21 @@ void parseCrsfFrame(const uint8_t *f,size_t n) {
   if(type==CRSF_RC_CHANNELS&&plen>=22){uint32_t bitbuf=0;int bits=0,idx=0;for(size_t i=0;i<22&&idx<16;i++){bitbuf|=((uint32_t)p[i])<<bits;bits+=8;while(bits>=11&&idx<16){uint16_t raw=bitbuf&0x7FF;bitbuf>>=11;bits-=11;channels[idx]=constrain(map(raw,172,1811,988,2012),800,2200);idx++;}} if(idx==16){lastRcMs=millis();for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.print("CH");for(int i=0;i<16;i++){Console.print(',');Console.print(channels[i]);}Console.println();}}
   else if(type==CRSF_LINK_STATISTICS&&plen>=10){linkRssi=(int16_t)-(int)p[0];linkLq=p[2];linkSnr=(int8_t)p[3];lastLinkStatMs=millis();Console.printf("LINK,%d,%u,%d\n",linkRssi,linkLq,(int)linkSnr);}
 }
-void pollCrsf(){while(CRSF.available()){lastCrsfByteMs=millis();rxHeard=true;uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
+void pollCrsf(){while(CRSF.available()){noteCrsfByte(millis());uint8_t b=CRSF.read();if(frameLen==0){if(b==0xC8||b==0xEE||b==0xEA||b==0xEC||b==0x00)frame[frameLen++]=b;continue;}if(frameLen>=sizeof(frame)){frameLen=0;continue;}frame[frameLen++]=b;if(frameLen==2){if(frame[1]<2||frame[1]>64){frameLen=0;continue;}}if(frameLen>=2&&frameLen==(size_t)frame[1]+2){size_t n=frameLen;if(crsfCrc(frame+2,n-3)==frame[n-1])parseCrsfFrame(frame,n);frameLen=0;}}}
 void setup(){Serial.begin(USB_BAUD);
 #if RANGELAB_WIFI
   CRSF.setRxBufferSize(1024);  // absorb a few dropped IRQs while WiFi transmits
 #endif
   CRSF.begin(CRSF_BAUD,SERIAL_8N1,CRSF_RX_PIN,-1);for(auto &c:channels)c=1500;loadConfig();loadLogArm();
+  railInit();
   logBootEvent();
   if(logArmed){openLogFile();Console.println("STATUS,LOG_ARMED_FIELD_MODE");}
 #if RANGELAB_WIFI
   startWifiBridge();
 #endif
   Console.println("READY,RangeLab-ESP32,1");Console.println("STATUS,OUTPUTS_DISABLED_ON_BOOT");}
-void loop(){pollCrsf();while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
+void loop(){const uint32_t loopNow=millis();lastIterationMs=loopNow-lastLoopMs;lastLoopMs=loopNow;pollRail();pollCrsf();flushGapEvent();
+  while(Serial.available()){char c=Serial.read();if(c=='\n'||c=='\r'){if(usbLine.length()){handleCommand(usbLine);usbLine="";}}else if(usbLine.length()<180)usbLine+=c;else usbLine="";}
   bool failsafe=millis()-lastRcMs>RC_TIMEOUT_MS;if(failsafe&&!wasFailsafe){for(int i=0;i<16;i++)writeOutput(i,channels[i]);Console.println("STATUS,RC_FAILSAFE_OUTPUTS_NEUTRAL");}wasFailsafe=failsafe;
   if(logArmed&&millis()-lastLogMs>=LOG_PERIOD_MS){lastLogMs=millis();logSample();}
   scanEvents();

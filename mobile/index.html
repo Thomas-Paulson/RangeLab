@@ -62,6 +62,8 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .meta strong.on { color: var(--warn); }
+  .meta strong.bad { color: var(--bad); }
+  .meta strong.good { color: var(--good); }
 
   .channels { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
   .row {
@@ -149,6 +151,7 @@
       <div><span>LINK</span><strong id="link">no frames yet</strong></div>
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
+      <div><span>5V RAIL</span><strong id="rail">not monitored</strong></div>
     </div>
     <div class="actions">
       <button class="grow" id="read-config" type="button">Read device config</button>
@@ -231,6 +234,8 @@
       <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
       <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
+      <strong>RX_GAP</strong> — the CRSF stream paused for 250 ms–1 s: an RX reset, not RF loss.
+      <strong>PWR_DIP</strong> — the 5V rail dropped below 4.60 V (depth and duration recorded); needs the optional ADC tap.
       <strong>BOOT</strong> — the ESP32 restarted; a rising number means it lost power too.
     </p>
   </section>

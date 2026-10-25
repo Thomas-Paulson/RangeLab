@@ -33,6 +33,7 @@ export function createState() {
     device: '',
     outputsEnabled: false,
     controlsUnlocked: false,
+    rail: null,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
     events: [],
     eventDraft: null,
@@ -151,6 +152,16 @@ export function applyLine(state, raw) {
       return { ...base, eventDraft: base.eventDraft.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
     }
     return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
+  }
+  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>. Absent when the
+  // divider is not wired, which is why the UI says "not monitored" instead.
+  if (upper.startsWith('RAIL,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 2) return base;
+    const [mv, minMv] = values;
+    // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
+    if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
+    return { ...base, rail: { mv, minMv } };
   }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };

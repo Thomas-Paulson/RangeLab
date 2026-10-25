@@ -6,7 +6,7 @@
 
 #include <Arduino.h>
 
-// 11537 bytes
+// 11929 bytes
 static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 <html lang="en">
 <head>
@@ -71,6 +71,8 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .meta strong.on { color: var(--warn); }
+  .meta strong.bad { color: var(--bad); }
+  .meta strong.good { color: var(--good); }
 
   .channels { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; }
   .row {
@@ -158,6 +160,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <div><span>LINK</span><strong id="link">no frames yet</strong></div>
       <div><span>RECEIVER</span><strong id="receiver">waiting</strong></div>
       <div><span>OUTPUTS</span><strong id="outputs">—</strong></div>
+      <div><span>5V RAIL</span><strong id="rail">not monitored</strong></div>
     </div>
     <div class="actions">
       <button class="grow" id="read-config" type="button">Read device config</button>
@@ -240,6 +243,8 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
       <strong>RX_SILENT</strong> — no CRSF bytes at all: the receiver stopped transmitting (power, ground or its TX wire).
       <strong>RF_LINK_LOST</strong> — the receiver is still talking but reports 0% link quality.
       <strong>RC_LOST</strong> — channel frames stopped while the receiver kept transmitting.
+      <strong>RX_GAP</strong> — the CRSF stream paused for 250 ms–1 s: an RX reset, not RF loss.
+      <strong>PWR_DIP</strong> — the 5V rail dropped below 4.60 V (depth and duration recorded); needs the optional ADC tap.
       <strong>BOOT</strong> — the ESP32 restarted; a rising number means it lost power too.
     </p>
   </section>
@@ -260,7 +265,7 @@ static const char INDEX_HTML[] PROGMEM = R"RL_INDEX_HTML(<!doctype html>
 </html>
 )RL_INDEX_HTML";
 
-// 9143 bytes
+// 9707 bytes
 static const char BRIDGE_JS[] PROGMEM = R"RL_BRIDGE_JS(// RangeLab mobile bridge protocol helpers.
 //
 // DOM-free and dependency-free so the Node test suite can exercise exactly the
@@ -296,6 +301,7 @@ export function createState() {
     device: '',
     outputsEnabled: false,
     controlsUnlocked: false,
+    rail: null,
     mappings: Array.from({ length: CHANNEL_COUNT }, (_, i) => emptyMapping(i + 1)),
     events: [],
     eventDraft: null,
@@ -415,6 +421,16 @@ export function applyLine(state, raw) {
     }
     return { ...base, events: base.events.concat(event).slice(-MAX_EVENTS), eventsVersion: base.eventsVersion + 1 };
   }
+  // Optional 5V rail tap: RAIL,<millivolts>,<lowest since boot>. Absent when the
+  // divider is not wired, which is why the UI says "not monitored" instead.
+  if (upper.startsWith('RAIL,')) {
+    const values = strictNumbers(line.split(',').slice(1));
+    if (!values || values.length < 2) return base;
+    const [mv, minMv] = values;
+    // 0 mV is a real reading (rail down while the ESP32 runs on its own supply).
+    if (!(mv >= 0 && mv <= 12000 && minMv >= 0 && minMv <= 12000)) return base;
+    return { ...base, rail: { mv, minMv } };
+  }
   if (upper.startsWith('DEVICE,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('PONG,')) return { ...base, device: line.split(',').slice(1).join(' ') };
   if (upper.startsWith('READY,')) return { ...base, device: line.split(',').slice(1).join(' ') };
@@ -473,7 +489,7 @@ export function pulsePercent(value) {
 }
 )RL_BRIDGE_JS";
 
-// 12163 bytes
+// 12637 bytes
 static const char APP_JS[] PROGMEM = R"RL_APP_JS(// Phone UI glue: WebSocket transport, rendering, and the mapping editor.
 // All protocol parsing and validation lives in ./bridge.js so the Node tests
 // cover it; this file only touches the DOM and the socket.
@@ -600,8 +616,10 @@ function buildChannelRows() {
   }
 }
 
-const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST']);
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK']);
+// Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
+const RAIL_LOW_MV = 4600;
 
 function formatUptime(ms) {
   const total = Math.max(0, Math.floor(Number(ms)));
@@ -641,6 +659,16 @@ function render() {
   const outputs = el('outputs');
   outputs.textContent = state.outputsEnabled ? 'ENABLED' : 'DISABLED';
   outputs.className = state.outputsEnabled ? 'on' : '';
+
+  const railCell = el('rail');
+  if (!state.rail) {
+    railCell.textContent = 'not monitored';
+    railCell.className = '';
+  } else {
+    const volts = (value) => `${(value / 1000).toFixed(2)} V`;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
+    railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+  }
 
   const rows = el('channels').children;
   for (let i = 0; i < rows.length; i += 1) {
@@ -854,6 +882,6 @@ connect();
 requestAnimationFrame(tick);
 )RL_APP_JS";
 
-static constexpr size_t WEB_ASSETS_BYTES = 32843;
+static constexpr size_t WEB_ASSETS_BYTES = 34273;
 
 #endif  // RANGELAB_WEB_ASSETS_H

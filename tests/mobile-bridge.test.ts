@@ -111,6 +111,19 @@ test('mobile: an empty dump keeps live events, and clearing empties the list', (
   assert.equal(state.events[0].detail, '');
 });
 
+test('mobile: shows the optional 5V rail reading and ignores nonsense', () => {
+  let state = applyLine(createState(), 'RAIL,4980,4712');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+
+  state = applyLine(state, 'RAIL,garbage,4712');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+  state = applyLine(state, 'RAIL,99000,4712');
+  assert.deepEqual(state.rail, { mv: 4980, minMv: 4712 });
+
+  // No ADC tap wired means no RAIL lines, and the page says "not monitored".
+  assert.equal(createState().rail, null);
+});
+
 test('mobile: rejects unsafe or nonsensical mappings', () => {
   const ok = { ...emptyMapping(1), mode: 'SERVO', pin: 13, outLow: 1000, outHigh: 2000 };
   assert.equal(validateMapping(ok).ok, true);

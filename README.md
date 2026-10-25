@@ -71,10 +71,12 @@ ESP32 plugged into an iPhone can never be read by an app.
 
 Outputs and mapping writes stay locked until you press **Unlock controls**, and `DISABLE`
 is always accepted. The page also shows the link/receiver **event log** the ESP32 keeps in
-flash (`RX_SILENT` for a receiver that stopped transmitting, `RF_LINK_LOST` for a lost RF
-link, `BOOT` for an ESP32 restart), and can clear it once unlocked. Field-log download
-stays on USB. Full setup, safety model and limitations:
-[docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
+flash (`RX_SILENT` for a receiver that stopped transmitting, `RX_GAP` for a short
+stream pause such as an RX brownout, `RF_LINK_LOST` for a lost RF link, `BOOT` for an ESP32
+restart), and can clear it once unlocked. Add a 10k/10k divider from the receiver's 5V pin
+to GPIO34 and set `RANGELAB_RAIL_ADC` to 34 to record actual **supply dips** (`PWR_DIP`) and
+show the live rail voltage on the page. Field-log download stays on USB. Full setup, safety
+model and limitations: [docs/MOBILE_WIFI.md](docs/MOBILE_WIFI.md).
 
 Set `#define RANGELAB_WIFI 0` in the sketch for the original USB-only build.
 

@@ -124,8 +124,10 @@ function buildChannelRows() {
   }
 }
 
-const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST']);
+const EVENT_BAD = new Set(['RX_SILENT', 'RF_LINK_LOST', 'RC_LOST', 'PWR_DIP']);
 const EVENT_GOOD = new Set(['RX_ACTIVE', 'RF_LINK_OK', 'RC_OK']);
+// Matches RAIL_LOW_MV in the sketch; only used to colour the reading.
+const RAIL_LOW_MV = 4600;
 
 function formatUptime(ms) {
   const total = Math.max(0, Math.floor(Number(ms)));
@@ -165,6 +167,16 @@ function render() {
   const outputs = el('outputs');
   outputs.textContent = state.outputsEnabled ? 'ENABLED' : 'DISABLED';
   outputs.className = state.outputsEnabled ? 'on' : '';
+
+  const railCell = el('rail');
+  if (!state.rail) {
+    railCell.textContent = 'not monitored';
+    railCell.className = '';
+  } else {
+    const volts = (value) => `${(value / 1000).toFixed(2)} V`;
+    railCell.textContent = `${volts(state.rail.mv)} · min ${volts(state.rail.minMv)}`;
+    railCell.className = state.rail.minMv < RAIL_LOW_MV ? 'bad' : 'good';
+  }
 
   const rows = el('channels').children;
   for (let i = 0; i < rows.length; i += 1) {
